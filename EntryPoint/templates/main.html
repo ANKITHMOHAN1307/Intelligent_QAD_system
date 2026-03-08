@@ -3,6 +3,7 @@
 
 {% block content %}
 <div class="container">
+    {% csrf_token %}
     <header class="hero card">
         <h1>📦 Smart Food Packet Scanner</h1>
         <p>Scan via camera, upload a barcode image, or type barcode manually.</p>
@@ -75,7 +76,47 @@ function normalizeBarcode(code) {
     return String(code || '').replace(/\s+/g, '').trim();
 }
 
-function analyzeBarcode(rawBarcode) {
+function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) {
+        return parts.pop().split(';').shift();
+    }
+    return '';
+}
+
+function getCSRFToken() {
+    const cookieToken = getCookie('csrftoken');
+    if (cookieToken) {
+        return cookieToken;
+    }
+    const hiddenToken = document.querySelector('input[name="csrfmiddlewaretoken"]');
+    return hiddenToken ? hiddenToken.value : '';
+}
+
+async function parseResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    const raw = await response.text();
+
+    if (contentType.includes('application/json')) {
+        try {
+            return JSON.parse(raw);
+        } catch (error) {
+            throw new Error('Invalid JSON response from server.');
+        }
+    }
+
+    if (!response.ok) {
+        if (raw.includes('CSRF') || response.status === 403) {
+            throw new Error('Request blocked by CSRF. Refresh page and try again.');
+        }
+        throw new Error(`Unexpected non-JSON response (${response.status}).`);
+    }
+
+    throw new Error('Server returned unexpected response format.');
+}
+
+async function analyzeBarcode(rawBarcode) {
     const barcode = normalizeBarcode(rawBarcode);
     if (!barcode) {
         showStatus('❌ Barcode is empty.', 'error');
@@ -84,23 +125,28 @@ function analyzeBarcode(rawBarcode) {
 
     showStatus(`Barcode decoded: ${barcode}. Fetching product data...`, 'info');
 
-    fetch('{% url "analyze_barcode" %}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ barcode })
-    })
-    .then(async (response) => {
-        const data = await response.json().catch(() => ({}));
+    try {
+        const response = await fetch('{% url "analyze_barcode" %}', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCSRFToken(),
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify({ barcode })
+        });
+
+        const data = await parseResponse(response);
         if (!response.ok || data.status !== 'success') {
             throw new Error(data.message || `Request failed (${response.status})`);
         }
-        return data;
-    })
-    .then((data) => {
+
         renderProductData(data);
         showStatus('✅ Product analysis completed successfully.', 'success');
-    })
-    .catch((err) => showStatus(`❌ ${err.message}`, 'error'));
+    } catch (error) {
+        showStatus(`❌ ${error.message}`, 'error');
+    }
 }
 
 function renderProductData(data) {
@@ -111,26 +157,31 @@ function renderProductData(data) {
     document.getElementById('ingredients').textContent = data.ingredients;
 
     const image = document.getElementById('productImage');
-    if (data.image) { image.src = data.image; image.style.display = 'block'; }
-    else { image.style.display = 'none'; }
+    if (data.image) {
+        image.src = data.image;
+        image.style.display = 'block';
+    } else {
+        image.style.display = 'none';
+    }
 
     document.getElementById('qualityPill').textContent = `Quality: ${data.quality.quality} (${data.quality.score}/100) · ${data.quality.message}`;
     document.getElementById('expiryPill').textContent = `Expiry: ${data.expiry.status} · ${data.expiry.message}`;
 
     const n = data.nutrition;
     const labels = ['Energy kcal', 'Protein', 'Carbs', 'Fat', 'Sugar', 'Salt', 'Fiber'];
-    const values = [n.energy_kcal_100g, n.proteins_100g, n.carbohydrates_100g, n.fat_100g, n.sugars_100g, n.salt_100g, n.fiber_100g].map(v => Number(v || 0));
+    const values = [n.energy_kcal_100g, n.proteins_100g, n.carbohydrates_100g, n.fat_100g, n.sugars_100g, n.salt_100g, n.fiber_100g].map((v) => Number(v || 0));
 
     if (nutritionChart) nutritionChart.destroy();
     nutritionChart = new Chart(document.getElementById('nutritionChart'), {
         type: 'bar',
-        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#3b82f6','#10b981','#f59e0b','#ef4444','#f43f5e','#6366f1','#14b8a6'] }] },
+        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#f43f5e', '#6366f1', '#14b8a6'] }] },
         options: { animation: { duration: 900 }, responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
     });
 }
 
 async function decodeWithBarcodeDetector(file) {
-    if (!('BarcodeDetector' in window)) return null;
+    if (!(window.BarcodeDetector && 'createImageBitmap' in window)) return null;
+
     const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
     const bitmap = await createImageBitmap(file);
     const codes = await detector.detect(bitmap);
@@ -139,13 +190,18 @@ async function decodeWithBarcodeDetector(file) {
 
 function decodeWithQuagga(file) {
     return new Promise((resolve) => {
-        if (!window.Quagga) { resolve(null); return; }
+        if (!window.Quagga) {
+            resolve(null);
+            return;
+        }
+
         const imageUrl = URL.createObjectURL(file);
         Quagga.decodeSingle({
             src: imageUrl,
             numOfWorkers: 0,
+            locator: { patchSize: 'medium', halfSample: true },
             decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'] }
-        }, function(result) {
+        }, (result) => {
             URL.revokeObjectURL(imageUrl);
             resolve(result && result.codeResult ? normalizeBarcode(result.codeResult.code) : null);
         });
@@ -154,28 +210,47 @@ function decodeWithQuagga(file) {
 
 async function decodeUploadedImage() {
     const fileInput = document.getElementById('imageInput');
-    if (!fileInput.files.length) { showStatus('❌ Please select an image first.', 'error'); return; }
+    if (!fileInput.files.length) {
+        showStatus('❌ Please select an image first.', 'error');
+        return;
+    }
 
     const file = fileInput.files[0];
     showStatus('Decoding uploaded image...', 'info');
 
     let decoded = null;
-    try { decoded = await decodeWithBarcodeDetector(file); } catch (_) {}
-    if (!decoded) decoded = await decodeWithQuagga(file);
+    try {
+        decoded = await decodeWithBarcodeDetector(file);
+    } catch (_) {}
 
-    if (decoded) analyzeBarcode(decoded);
-    else showStatus('❌ Could not decode barcode from uploaded image. Try a clearer barcode image.', 'error');
+    if (!decoded) {
+        decoded = await decodeWithQuagga(file);
+    }
+
+    if (decoded) {
+        analyzeBarcode(decoded);
+    } else {
+        showStatus('❌ Could not decode barcode from uploaded image. Try clearer crop/lighting or use manual input.', 'error');
+    }
 }
 
 function startScanner() {
     if (activeScanner) return;
-    if (!window.Quagga) { showStatus('❌ Scanner library failed to load.', 'error'); return; }
+    if (!window.Quagga) {
+        showStatus('❌ Scanner library failed to load.', 'error');
+        return;
+    }
 
     Quagga.init({
         inputStream: { type: 'LiveStream', constraints: { facingMode: 'environment' }, target: document.getElementById('scanner') },
+        locator: { patchSize: 'medium', halfSample: true },
         decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'] }
-    }, function(err) {
-        if (err) { showStatus('❌ Camera unavailable or blocked in this environment.', 'error'); return; }
+    }, (err) => {
+        if (err) {
+            showStatus('❌ Camera unavailable or blocked in this environment.', 'error');
+            return;
+        }
+
         Quagga.start();
         activeScanner = true;
         showStatus('Scanner started. Hold barcode steady.', 'info');

@@ -4,7 +4,7 @@ from urllib import error, request as urllib_request
 
 from django.http import JsonResponse
 from django.shortcuts import render
-from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 OPEN_FOOD_FACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
@@ -84,7 +84,6 @@ def _nutrition_quality(nutriments):
     return {"score": max(score, 0), "quality": "Caution", "message": "High levels detected; consume in moderation."}
 
 
-@csrf_exempt
 @require_POST
 def analyze_barcode(request):
     payload = {}
