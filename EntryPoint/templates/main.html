@@ -3,15 +3,15 @@
 
 {% block content %}
 <div class="container">
-    {% csrf_token %}
     <header class="hero card">
         <h1>📦 Smart Food Packet Scanner</h1>
-        <p>Scan via camera, upload a barcode image, or type barcode manually.</p>
+        <p>Scan or upload a barcode, fetch product details from Open Food Facts, then view ingredients, nutrition, quality indicators, and expiry risk.</p>
     </header>
 
     <section class="scan-grid">
         <article class="card pop">
             <h2>📷 Live Camera Scanner</h2>
+            <p>Point your camera at the barcode and click start.</p>
             <div id="scanner" class="scanner-box"></div>
             <div class="actions">
                 <button id="startScanner" class="btn btn-primary">Start Scanner</button>
@@ -21,20 +21,16 @@
 
         <article class="card pop">
             <h2>🖼️ Upload Barcode Image</h2>
+            <p>Upload a product image with a visible barcode.</p>
             <input type="file" id="imageInput" accept="image/*" />
             <div class="actions">
                 <button id="decodeImageBtn" class="btn btn-secondary">Decode Uploaded Image</button>
             </div>
-            <hr>
-            <h3>⌨️ Manual barcode</h3>
-            <div class="actions">
-                <input id="manualBarcode" type="text" placeholder="Enter barcode (EAN/UPC)" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid #cbd5e1;">
-                <button id="manualSubmitBtn" class="btn btn-secondary">Analyze Barcode</button>
-            </div>
+            <p class="small">Tip: clear, well-lit barcode images decode faster.</p>
         </article>
     </section>
 
-    <section class="card result-panel" id="resultPanel" style="display:none;">
+    <section class="card result-panel fade" id="resultPanel" style="display:none;">
         <div class="result-header">
             <div>
                 <h2 id="productName">Product</h2>
@@ -64,7 +60,12 @@
 <script>
 let activeScanner = false;
 let nutritionChart = null;
-let onDetectedHandlerAttached = false;
+
+function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+}
 
 function showStatus(message, variant = 'info') {
     const el = document.getElementById('statusMessage');
@@ -72,78 +73,28 @@ function showStatus(message, variant = 'info') {
     el.textContent = message;
 }
 
-function normalizeBarcode(code) {
-    return String(code || '').replace(/\s+/g, '').trim();
-}
-
-function getCookie(name) {
-    let cookieValue = null;
-    if (document.cookie && document.cookie !== '') {
-        const cookies = document.cookie.split(';');
-        for (let cookie of cookies) {
-            cookie = cookie.trim();
-            if (cookie.startsWith(name + '=')) {
-                cookieValue = decodeURIComponent(cookie.slice(name.length + 1));
-                break;
-            }
-        }
-    }
-    return cookieValue;
-}
-
-async function parseResponse(response) {
-    const contentType = response.headers.get('content-type') || '';
-    const raw = await response.text();
-
-    if (contentType.includes('application/json')) {
-        try {
-            return JSON.parse(raw);
-        } catch (error) {
-            throw new Error('Invalid JSON response from server.');
-        }
-    }
-
-    if (!response.ok) {
-        if (raw.includes('CSRF') || response.status === 403) {
-            throw new Error('Request blocked by CSRF. Refresh page and try again.');
-        }
-        throw new Error(`Unexpected non-JSON response (${response.status}).`);
-    }
-
-    throw new Error('Server returned unexpected response format.');
-}
-
-async function analyzeBarcode(rawBarcode) {
-    const barcode = normalizeBarcode(rawBarcode);
-    if (!barcode) {
-        showStatus('❌ Barcode is empty.', 'error');
-        return;
-    }
-
+function analyzeBarcode(barcode) {
     showStatus(`Barcode decoded: ${barcode}. Fetching product data...`, 'info');
 
-    try {
-        const response = await fetch('{% url "analyze_barcode" %}', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken'),
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: JSON.stringify({ barcode })
-        });
-
-        const data = await parseResponse(response);
-        if (!response.ok || data.status !== 'success') {
-            throw new Error(data.message || `Request failed (${response.status})`);
+    fetch('{% url "analyze_barcode" %}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({ barcode })
+    })
+    .then((response) => response.json().then(data => ({ ok: response.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok || data.status !== 'success') {
+            throw new Error(data.message || 'Unable to fetch product details.');
         }
-
         renderProductData(data);
         showStatus('✅ Product analysis completed successfully.', 'success');
-    } catch (error) {
-        showStatus(`❌ ${error.message}`, 'error');
-    }
+    })
+    .catch((err) => {
+        showStatus(`❌ ${err.message}`, 'error');
+    });
 }
 
 function renderProductData(data) {
@@ -164,48 +115,82 @@ function renderProductData(data) {
     document.getElementById('qualityPill').textContent = `Quality: ${data.quality.quality} (${data.quality.score}/100) · ${data.quality.message}`;
     document.getElementById('expiryPill').textContent = `Expiry: ${data.expiry.status} · ${data.expiry.message}`;
 
-    const n = data.nutrition;
-    const labels = ['Energy kcal', 'Protein', 'Carbs', 'Fat', 'Sugar', 'Salt', 'Fiber'];
-    const values = [n.energy_kcal_100g, n.proteins_100g, n.carbohydrates_100g, n.fat_100g, n.sugars_100g, n.salt_100g, n.fiber_100g].map((v) => Number(v || 0));
+    const nutrients = data.nutrition;
+    const chartLabels = ['Energy kcal', 'Protein', 'Carbs', 'Fat', 'Sugar', 'Salt', 'Fiber'];
+    const chartValues = [
+        Number(nutrients.energy_kcal_100g || 0),
+        Number(nutrients.proteins_100g || 0),
+        Number(nutrients.carbohydrates_100g || 0),
+        Number(nutrients.fat_100g || 0),
+        Number(nutrients.sugars_100g || 0),
+        Number(nutrients.salt_100g || 0),
+        Number(nutrients.fiber_100g || 0),
+    ];
 
-    if (nutritionChart) nutritionChart.destroy();
+    if (nutritionChart) {
+        nutritionChart.destroy();
+    }
+
     nutritionChart = new Chart(document.getElementById('nutritionChart'), {
         type: 'bar',
-        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#f43f5e', '#6366f1', '#14b8a6'] }] },
-        options: { animation: { duration: 900 }, responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+        data: {
+            labels: chartLabels,
+            datasets: [{
+                label: 'Amount per 100g',
+                data: chartValues,
+                borderRadius: 8,
+                backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#f43f5e', '#6366f1', '#14b8a6']
+            }]
+        },
+        options: {
+            animation: { duration: 900, easing: 'easeOutBounce' },
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } }
+        }
     });
 }
 
-async function decodeWithBarcodeDetector(file) {
-    if (!(window.BarcodeDetector && 'createImageBitmap' in window)) return null;
+function startScanner() {
+    if (activeScanner) return;
 
-    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-    const bitmap = await createImageBitmap(file);
-    const codes = await detector.detect(bitmap);
-    return codes.length ? normalizeBarcode(codes[0].rawValue) : null;
-}
-
-function decodeWithQuagga(file) {
-    return new Promise((resolve) => {
-        if (!window.Quagga) {
-            resolve(null);
+    Quagga.init({
+        inputStream: {
+            type: 'LiveStream',
+            constraints: { facingMode: 'environment' },
+            target: document.getElementById('scanner')
+        },
+        decoder: {
+            readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader']
+        }
+    }, function(err) {
+        if (err) {
+            showStatus('❌ Camera unavailable or blocked in this environment.', 'error');
             return;
         }
+        Quagga.start();
+        activeScanner = true;
+        showStatus('Scanner started. Hold barcode steady.', 'info');
+    });
 
-        const imageUrl = URL.createObjectURL(file);
-        Quagga.decodeSingle({
-            src: imageUrl,
-            numOfWorkers: 0,
-            locator: { patchSize: 'medium', halfSample: true },
-            decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'] }
-        }, (result) => {
-            URL.revokeObjectURL(imageUrl);
-            resolve(result && result.codeResult ? normalizeBarcode(result.codeResult.code) : null);
-        });
+    Quagga.onDetected((result) => {
+        const code = result.codeResult.code;
+        if (code) {
+            stopScanner();
+            analyzeBarcode(code);
+        }
     });
 }
 
-async function decodeUploadedImage() {
+function stopScanner() {
+    if (activeScanner) {
+        Quagga.stop();
+        activeScanner = false;
+        showStatus('Scanner stopped.', 'info');
+    }
+}
+
+function decodeUploadedImage() {
     const fileInput = document.getElementById('imageInput');
     if (!fileInput.files.length) {
         showStatus('❌ Please select an image first.', 'error');
@@ -213,95 +198,58 @@ async function decodeUploadedImage() {
     }
 
     const file = fileInput.files[0];
-    showStatus('Decoding uploaded image...', 'info');
+    const imageUrl = URL.createObjectURL(file);
 
-    let decoded = null;
-    try {
-        decoded = await decodeWithBarcodeDetector(file);
-    } catch (_) {}
-
-    if (!decoded) {
-        decoded = await decodeWithQuagga(file);
-    }
-
-    if (decoded) {
-        analyzeBarcode(decoded);
-    } else {
-        showStatus('❌ Could not decode barcode from uploaded image. Try clearer crop/lighting or use manual input.', 'error');
-    }
-}
-
-function startScanner() {
-    if (activeScanner) return;
-    if (!window.Quagga) {
-        showStatus('❌ Scanner library failed to load.', 'error');
-        return;
-    }
-
-    Quagga.init({
-        inputStream: { type: 'LiveStream', constraints: { facingMode: 'environment' }, target: document.getElementById('scanner') },
-        locator: { patchSize: 'medium', halfSample: true },
-        decoder: { readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'] }
-    }, (err) => {
-        if (err) {
-            showStatus('❌ Camera unavailable or blocked in this environment.', 'error');
-            return;
+    Quagga.decodeSingle({
+        src: imageUrl,
+        numOfWorkers: 0,
+        decoder: {
+            readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader']
         }
-
-        Quagga.start();
-        activeScanner = true;
-        showStatus('Scanner started. Hold barcode steady.', 'info');
-
-        if (!onDetectedHandlerAttached) {
-            Quagga.onDetected((result) => {
-                const code = normalizeBarcode(result?.codeResult?.code);
-                if (code) {
-                    stopScanner();
-                    analyzeBarcode(code);
-                }
-            });
-            onDetectedHandlerAttached = true;
+    }, function(result) {
+        URL.revokeObjectURL(imageUrl);
+        if (result && result.codeResult) {
+            analyzeBarcode(result.codeResult.code);
+        } else {
+            showStatus('❌ Could not decode barcode from uploaded image.', 'error');
         }
     });
-}
-
-function stopScanner() {
-    if (!activeScanner) return;
-    Quagga.stop();
-    activeScanner = false;
-    showStatus('Scanner stopped.', 'info');
 }
 
 document.getElementById('startScanner').addEventListener('click', startScanner);
 document.getElementById('stopScanner').addEventListener('click', stopScanner);
 document.getElementById('decodeImageBtn').addEventListener('click', decodeUploadedImage);
-document.getElementById('manualSubmitBtn').addEventListener('click', () => analyzeBarcode(document.getElementById('manualBarcode').value));
 </script>
 
 <style>
 .hero { margin-bottom: 20px; animation: fadeUp .6s ease; }
+.hero h1 { margin: 0 0 8px; }
 .hero p { margin: 0; color: var(--muted); }
 .scan-grid { display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); margin-bottom:20px; }
-.scanner-box { min-height:220px; border:2px dashed #94a3b8; border-radius:12px; margin:12px 0; overflow:hidden; }
-.btn { border:none; padding:10px 15px; border-radius:10px; cursor:pointer; font-weight:600; transition: transform .2s ease; }
-.btn:hover { transform: translateY(-2px); }
-.btn-primary { background:var(--primary); color:white; }
-.btn-secondary { background:var(--secondary); color:white; }
-.actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-.small { color:var(--muted); font-size:.92rem; }
+.scanner-box { min-height: 220px; border:2px dashed #94a3b8; border-radius: 12px; margin: 12px 0; overflow: hidden; }
+.btn { border:none; padding:10px 15px; border-radius:10px; cursor:pointer; font-weight:600; transition: transform .2s ease, opacity .2s; }
+.btn:hover { transform: translateY(-2px); opacity: .95; }
+.btn-primary { background: var(--primary); color: white; }
+.btn-secondary { background: var(--secondary); color: white; }
+.actions { display:flex; gap:10px; flex-wrap:wrap; }
+.small { color: var(--muted); font-size: .92rem; }
 .pop { animation: popIn .55s ease; }
-.result-panel { margin-top:20px; }
+.result-panel { margin-top: 20px; }
 .result-header { display:flex; gap:20px; justify-content:space-between; align-items:start; }
-#productImage { width:140px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.12); }
-.status-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:14px 0; }
-.pill { padding:10px 12px; border-radius:999px; background:#e2e8f0; font-weight:600; font-size:.92rem; }
-.status { margin-top:16px; padding:12px; border-radius:10px; display:none; }
+#productImage { width: 140px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+.status-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+.pill { padding:10px 12px; border-radius: 999px; background: #e2e8f0; font-weight:600; font-size:.92rem; }
+.status { margin-top: 16px; padding: 12px; border-radius: 10px; display:none; }
 .status.show { display:block; }
 .status.info { background:#dbeafe; color:#1e3a8a; }
 .status.success { background:#dcfce7; color:#166534; }
 .status.error { background:#fee2e2; color:#991b1b; }
-@keyframes popIn { from { transform:scale(.96); opacity:0; } to { transform:scale(1); opacity:1; } }
-@keyframes fadeUp { from { transform:translateY(18px); opacity:0; } to { transform:translateY(0); opacity:1; } }
-@media (max-width:760px) { .status-grid { grid-template-columns:1fr; } .result-header { flex-direction:column; } }
+
+@keyframes popIn { from { transform: scale(.96); opacity:0; } to { transform: scale(1); opacity:1; } }
+@keyframes fadeUp { from { transform: translateY(18px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+@media (max-width: 760px) {
+    .status-grid { grid-template-columns: 1fr; }
+    .result-header { flex-direction:column; }
+}
 </style>
 {% endblock %}
