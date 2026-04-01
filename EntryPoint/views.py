@@ -6,6 +6,8 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.http import require_POST
 
+from .tasks import run_ocr_fallback
+
 OPEN_FOOD_FACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 
 
@@ -112,22 +114,26 @@ def analyze_barcode(request):
         with urllib_request.urlopen(api_url, timeout=12) as response:
             result = json.loads(response.read().decode("utf-8"))
     except (error.HTTPError, error.URLError, TimeoutError):
+        task = run_ocr_fallback.delay()
         return JsonResponse(
             {
-                "status": "error",
-                "message": "Unable to contact Open Food Facts service right now.",
+                "status": "fallback",
+                "message": "OCR run",
+                "task_id": task.id,
             },
-            status=502,
+            status=202,
         )
 
     product = result.get("product", {})
     if result.get("status") != 1 or not product:
+        task = run_ocr_fallback.delay()
         return JsonResponse(
             {
-                "status": "error",
-                "message": "No product information found for this barcode.",
+                "status": "fallback",
+                "message": "OCR run",
+                "task_id": task.id,
             },
-            status=404,
+            status=202,
         )
 
     ingredients = product.get("ingredients_text_en") or product.get("ingredients_text") or "Not available"
