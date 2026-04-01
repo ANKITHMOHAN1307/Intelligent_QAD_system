@@ -4,6 +4,7 @@ from urllib import error, request as urllib_request
 
 from django.http import JsonResponse
 from django.shortcuts import render
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 OPEN_FOOD_FACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
@@ -13,6 +14,7 @@ def splash(request):
     return render(request, "splash.html")
 
 
+@ensure_csrf_cookie
 def main(request):
     return render(request, "main.html")
 
@@ -45,21 +47,13 @@ def _parse_expiry_status(raw_value):
 
     days_left = (parsed_date - datetime.utcnow().date()).days
     if days_left < 0:
-        status = "Expired"
-        message = "Product appears to be past expiry date."
+        status, message = "Expired", "Product appears to be past expiry date."
     elif days_left <= 30:
-        status = "Near Expiry"
-        message = "Product should be consumed soon."
+        status, message = "Near Expiry", "Product should be consumed soon."
     else:
-        status = "Safe Window"
-        message = "Product is not near expiry based on available data."
+        status, message = "Safe Window", "Product is not near expiry based on available data."
 
-    return {
-        "raw": raw_value,
-        "days_left": days_left,
-        "status": status,
-        "message": message,
-    }
+    return {"raw": raw_value, "days_left": days_left, "status": status, "message": message}
 
 
 def _nutrition_quality(nutriments):
@@ -84,79 +78,54 @@ def _nutrition_quality(nutriments):
         score -= 10
 
     if score >= 75:
-        quality = "Good"
-        message = "Balanced nutrition profile for basic screening."
-    elif score >= 50:
-        quality = "Moderate"
-        message = "Contains medium-high levels of sugar/salt/fat."
-    else:
-        quality = "Caution"
-        message = "High levels detected; consume in moderation."
-
-    return {"score": max(score, 0), "quality": quality, "message": message}
+        return {"score": score, "quality": "Good", "message": "Balanced nutrition profile for basic screening."}
+    if score >= 50:
+        return {"score": score, "quality": "Moderate", "message": "Contains medium-high levels of sugar/salt/fat."}
+    return {"score": max(score, 0), "quality": "Caution", "message": "High levels detected; consume in moderation."}
 
 
 @require_POST
 def analyze_barcode(request):
-    try:
-        payload = json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError:
-        return JsonResponse({"status": "error", "message": "Invalid request payload."}, status=400)
+    payload = {}
+    if request.body:
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {}
 
-    barcode = str(payload.get("barcode", "")).strip()
+    barcode = str(payload.get("barcode") or request.POST.get("barcode") or "").strip()
     if not barcode:
         return JsonResponse({"status": "error", "message": "Barcode is required."}, status=400)
 
-    api_url = OPEN_FOOD_FACTS_URL.format(barcode=barcode)
     try:
-        with urllib_request.urlopen(api_url, timeout=12) as response:
+        with urllib_request.urlopen(OPEN_FOOD_FACTS_URL.format(barcode=barcode), timeout=12) as response:
             result = json.loads(response.read().decode("utf-8"))
-    except (error.HTTPError, error.URLError, TimeoutError):
-        return JsonResponse(
-            {
-                "status": "error",
-                "message": "Unable to contact Open Food Facts service right now.",
-            },
-            status=502,
-        )
+    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
+        return JsonResponse({"status": "error", "message": "Unable to contact Open Food Facts service right now."}, status=502)
 
-    product = result.get("product", {})
+    product = result.get("product") or {}
     if result.get("status") != 1 or not product:
-        return JsonResponse(
-            {
-                "status": "error",
-                "message": "No product information found for this barcode.",
-            },
-            status=404,
-        )
+        return JsonResponse({"status": "error", "message": "No product information found for this barcode."}, status=404)
 
-    ingredients = product.get("ingredients_text_en") or product.get("ingredients_text") or "Not available"
-    nutriments = product.get("nutriments", {})
-
-    nutrition = {
-        "energy_kcal_100g": nutriments.get("energy-kcal_100g") or nutriments.get("energy-kcal"),
-        "proteins_100g": nutriments.get("proteins_100g"),
-        "carbohydrates_100g": nutriments.get("carbohydrates_100g"),
-        "fat_100g": nutriments.get("fat_100g"),
-        "sugars_100g": nutriments.get("sugars_100g"),
-        "salt_100g": nutriments.get("salt_100g"),
-        "fiber_100g": nutriments.get("fiber_100g"),
-    }
-
-    expiry_info = _parse_expiry_status(product.get("expiration_date"))
-    quality = _nutrition_quality(nutriments)
-
+    nutriments = product.get("nutriments") or {}
     response_data = {
         "status": "success",
         "barcode": barcode,
         "product_name": product.get("product_name", "Unknown product"),
         "brand": product.get("brands", "Unknown brand"),
-        "ingredients": ingredients,
+        "ingredients": product.get("ingredients_text_en") or product.get("ingredients_text") or "Not available",
         "manufacturing_date": product.get("manufacturing_places", "Not available"),
-        "expiry": expiry_info,
-        "nutrition": nutrition,
-        "quality": quality,
+        "expiry": _parse_expiry_status(product.get("expiration_date")),
+        "nutrition": {
+            "energy_kcal_100g": nutriments.get("energy-kcal_100g") or nutriments.get("energy-kcal"),
+            "proteins_100g": nutriments.get("proteins_100g"),
+            "carbohydrates_100g": nutriments.get("carbohydrates_100g"),
+            "fat_100g": nutriments.get("fat_100g"),
+            "sugars_100g": nutriments.get("sugars_100g"),
+            "salt_100g": nutriments.get("salt_100g"),
+            "fiber_100g": nutriments.get("fiber_100g"),
+        },
+        "quality": _nutrition_quality(nutriments),
         "image": product.get("image_front_url") or product.get("image_url"),
     }
-
     return JsonResponse(response_data)
