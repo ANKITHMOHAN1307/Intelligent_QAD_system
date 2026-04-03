@@ -7,8 +7,6 @@
     <header class="hero card">
         <h1>🌿 Smart Food Packet Scanner</h1>
         <p>Scan via camera, upload image, or enter barcode manually.</p>
-        <h1>📦 Smart Food Packet Scanner</h1>
-        <p>Scan via camera, upload a barcode image, or type barcode manually.</p>
     </header>
 
     <section class="scan-grid">
@@ -21,18 +19,13 @@
             </div>
         </article>
 
-        <article class="card pop">
+        <article class="card pop upload-card">
             <h2>🖼️ Upload Barcode Image</h2>
             <input type="file" id="imageInput" accept="image/*" />
             <div class="actions">
                 <button id="decodeImageBtn" class="btn btn-secondary">Decode Uploaded Image</button>
             </div>
-            <hr>
-            <h3>⌨️ Manual barcode</h3>
-            <div class="actions">
-                <input id="manualBarcode" type="text" placeholder="Enter barcode (EAN/UPC)" class="text-input">
-                <button id="manualSubmitBtn" class="btn btn-secondary">Analyze Barcode</button>
-            </div>
+            <p class="small">Tip: Upload a clear, straight barcode image with good lighting.</p>
         </article>
     </section>
 
@@ -186,6 +179,45 @@ function classifyIngredients(ingredientsText) {
             organic.push(ingredient);
             continue;
         }
+    }
+    return cookieValue;
+}
+
+async function parseResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    const raw = await response.text();
+
+    if (contentType.includes('application/json')) {
+        try { return JSON.parse(raw); } catch { throw new Error('Invalid JSON response from server.'); }
+    }
+
+    if (!response.ok) {
+        if (raw.includes('CSRF') || response.status === 403) throw new Error('Request blocked by CSRF. Refresh page and try again.');
+        throw new Error(`Unexpected non-JSON response (${response.status}).`);
+    }
+
+    throw new Error('Server returned unexpected response format.');
+}
+
+function splitIngredients(ingredientsText) {
+    return String(ingredientsText || '')
+        .split(/,|;|\.|\(|\)/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function uniqueItems(items) {
+    return [...new Set(items.map((item) => item.toLowerCase()))].map(
+        (lower) => items.find((item) => item.toLowerCase() === lower)
+    );
+}
+
+function classifyIngredients(ingredientsText) {
+    const parts = splitIngredients(ingredientsText);
+
+    const organic = [];
+    const chemical = [];
+    const additive = [];
 
         if (/\be\d{3,4}\b/.test(value)) {
             additive.push(ingredient);
@@ -356,14 +388,14 @@ async function decodeUploadedImage() {
     }
 
     const file = fileInput.files[0];
-    showStatus('Scanning full image + bottom regions for barcode...', 'info');
+    showStatus('Checking uploaded image for barcode...', 'info');
 
     let candidates;
     try {
         candidates = await generateImageCandidates(file);
     } catch {
         showStatus('❌ Unable to read uploaded image.', 'error');
-        showAlert('Display at well litted place and upload a clear barcode image.');
+        showAlert('Upload a clear barcode image with good lighting.');
         return;
     }
 
@@ -381,7 +413,7 @@ async function decodeUploadedImage() {
     }
 
     showStatus('❌ Could not decode barcode. Try a clearer image, or use manual input.', 'error');
-    showAlert('Display at well litted place and keep barcode straight for better scan.');
+    showAlert('Could not read barcode from upload. Try a closer and clearer barcode image.');
 }
 
 function isStableDetection(code) {
@@ -452,7 +484,6 @@ function stopScanner() {
 document.getElementById('startScanner').addEventListener('click', startScanner);
 document.getElementById('stopScanner').addEventListener('click', stopScanner);
 document.getElementById('decodeImageBtn').addEventListener('click', decodeUploadedImage);
-document.getElementById('manualSubmitBtn').addEventListener('click', () => analyzeBarcode(document.getElementById('manualBarcode').value));
 document.getElementById('alertCloseBtn').addEventListener('click', hideAlert);
 </script>
 
@@ -500,12 +531,18 @@ document.getElementById('alertCloseBtn').addEventListener('click', hideAlert);
     object-fit: cover;
 }
 
-.text-input {
-    flex:1;
-    min-width:220px;
-    padding:10px;
-    border-radius:10px;
-    border:1px solid #cbd5e1;
+.upload-card {
+    background: linear-gradient(180deg, #ffffff 0%, #f6fff7 100%);
+    border: 1px solid #d9f2dc;
+}
+
+.upload-card input[type="file"] {
+    width: 100%;
+    padding: 10px;
+    border: 1px dashed #9ccc65;
+    border-radius: 10px;
+    background: #fcfffc;
+    margin-bottom: 10px;
 }
 
 .btn { border:none; padding:10px 15px; border-radius:10px; cursor:pointer; font-weight:600; transition: transform .2s ease; }

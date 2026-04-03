@@ -1,0 +1,16 @@
+Edited files:
+1) EntryPoint/templates/main.html
+   - Removed manual barcode input UI and JS listener.
+   - Improved upload card styling for cleaner UX.
+   - Updated upload flow messages so upload decode does not appear as live-camera scanning.
+   - Made upload failure alerts upload-specific.
+
+What to merge:
+- Merge commit: (latest commit on branch)
+- If cherry-picking manually, cherry-pick the latest commit hash shown by:
+  git log --oneline -n 1
+
+Recommended merge approach:
+1) git checkout <target-branch>
+2) git merge work
+   (or: git cherry-pick <latest-commit-hash>)
