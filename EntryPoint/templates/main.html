@@ -212,25 +212,6 @@ function uniqueItems(items) {
     );
 }
 
-function classifyIngredients(ingredientsText) {
-    const parts = splitIngredients(ingredientsText);
-
-    const organic = [];
-    const chemical = [];
-    const additive = [];
-
-        if (/\be\d{3,4}\b/.test(value)) {
-            additive.push(ingredient);
-        }
-    }
-
-    return {
-        organic: uniqueItems(organic),
-        chemical: uniqueItems(chemical),
-        additive: uniqueItems(additive)
-    };
-}
-
 function renderClassList(elementId, values, emptyLabel) {
     const el = document.getElementById(elementId);
     el.innerHTML = '';
