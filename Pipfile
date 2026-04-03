@@ -5,6 +5,11 @@ name = "pypi"
 
 [packages]
 django = "*"
+python-dotenv = "*"
+pytesseract = "*"
+easyoc = "*"
+ocr = "*"
+paddleocr = "*"
 
 [dev-packages]
 

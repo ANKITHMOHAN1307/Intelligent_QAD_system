@@ -233,38 +233,24 @@ def analyze_barcode(request):
 
     return JsonResponse(response_data)
 
+from django.http import JsonResponse
+from django.views.decorators.http import require_POST
+from .ocr_service import process_food_label
+
 
 @require_POST
 def analyze_ocr_label(request):
-    image_file = request.FILES.get("image")
-    if not image_file:
-        return JsonResponse({"status": "error", "message": "Image file is required."}, status=400)
-
     try:
-        image_base64 = image_file_to_base64(image_file)
-        ocr_data = analyze_label_image(
-            image_base64=image_base64,
-            mime_type=image_file.content_type or "image/jpeg",
-        )
-    except ValueError as exc:
-        return JsonResponse({"status": "error", "message": str(exc)}, status=500)
-    except RuntimeError as exc:
-        return JsonResponse({"status": "error", "message": str(exc)}, status=502)
+        image_file = request.FILES.get("image")
 
-    return JsonResponse(
-        {
-            "status": "success",
-            "ingredients": ", ".join(ocr_data.get("ingredients", [])) or "Not available",
-            "ocr_text": ocr_data.get("raw_text", ""),
-            "ocr_nutrients": ocr_data.get("nutrients", []),
-            "nutrition": ocr_data.get("nutrition_per_100g", {}),
-            "product_name": "OCR Label Analysis",
-            "brand": "From scanned/uploaded image",
-            "barcode": "OCR",
-            "manufacturing_date": "Not available",
-            "expiry": {"status": "Unknown", "message": "OCR mode does not infer expiry unless visible."},
-            "quality": {"quality": "OCR", "score": "-", "message": "Values generated from detected label text."},
-            "best_alternative": None,
-            "image": None,
-        }
-    )
+        if not image_file:
+            return JsonResponse({"error": "No image uploaded"}, status=400)
+
+        result = process_food_label(image_file)
+
+        return JsonResponse(result)
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    
