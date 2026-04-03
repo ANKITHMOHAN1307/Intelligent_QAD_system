@@ -5,6 +5,8 @@
 <div class="container">
     {% csrf_token %}
     <header class="hero card">
+        <h1>🌿 Smart Food Packet Scanner</h1>
+        <p>Scan via camera, upload image, or enter barcode manually.</p>
         <h1>📦 Smart Food Packet Scanner</h1>
         <p>Scan via camera, upload a barcode image, or type barcode manually.</p>
     </header>
@@ -28,7 +30,7 @@
             <hr>
             <h3>⌨️ Manual barcode</h3>
             <div class="actions">
-                <input id="manualBarcode" type="text" placeholder="Enter barcode (EAN/UPC)" style="flex:1; min-width:220px; padding:10px; border-radius:10px; border:1px solid #cbd5e1;">
+                <input id="manualBarcode" type="text" placeholder="Enter barcode (EAN/UPC)" class="text-input">
                 <button id="manualSubmitBtn" class="btn btn-secondary">Analyze Barcode</button>
             </div>
         </article>
@@ -52,11 +54,35 @@
         <h3>Ingredients</h3>
         <p id="ingredients"></p>
 
+        <h3>Ingredient Classification</h3>
+        <div class="classify-grid">
+            <div class="class-card organic">
+                <h4>🌱 Organic / Natural</h4>
+                <ul id="organicList"></ul>
+            </div>
+            <div class="class-card chemical">
+                <h4>🧪 Chemical Components</h4>
+                <ul id="chemicalList"></ul>
+            </div>
+            <div class="class-card additive">
+                <h4>🧴 Additives / Preservatives</h4>
+                <ul id="additiveList"></ul>
+            </div>
+        </div>
+
         <h3>Nutritional Composition (per 100g)</h3>
         <canvas id="nutritionChart" height="120"></canvas>
     </section>
 
     <div id="statusMessage" class="status"></div>
+</div>
+
+<div id="alertOverlay" class="alert-overlay" style="display:none;">
+    <div class="alert-box">
+        <h3>📸 Scanning Tip</h3>
+        <p id="alertText">Display at well litted place.</p>
+        <button id="alertCloseBtn" class="btn btn-primary">Got it</button>
+    </div>
 </div>
 
 <script src="https://unpkg.com/quagga@0.12.1/dist/quagga.min.js"></script>
@@ -69,10 +95,23 @@ let recentDetections = [];
 
 const BARCODE_READERS = ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'];
 
+const ORGANIC_KEYWORDS = ['water', 'milk', 'wheat', 'rice', 'corn', 'oats', 'salt', 'sugar', 'honey', 'cocoa', 'fruit', 'vegetable', 'tomato', 'onion', 'garlic', 'ginger', 'turmeric', 'pepper', 'coconut', 'almond', 'peanut'];
+const CHEMICAL_KEYWORDS = ['carbonate', 'sulfate', 'phosphate', 'chloride', 'hydroxide', 'sodium', 'potassium', 'calcium', 'magnesium', 'nitrite', 'nitrate', 'acid', 'monosodium glutamate', 'msg'];
+const ADDITIVE_KEYWORDS = ['preservative', 'stabilizer', 'emulsifier', 'colour', 'color', 'flavour', 'flavor', 'sweetener', 'e100', 'e101', 'e102', 'e110', 'e120', 'e200', 'e211', 'e250', 'e330', 'sorbate', 'benzoate'];
+
 function showStatus(message, variant = 'info') {
     const el = document.getElementById('statusMessage');
     el.className = `status show ${variant}`;
     el.textContent = message;
+}
+
+function showAlert(message) {
+    document.getElementById('alertText').textContent = message;
+    document.getElementById('alertOverlay').style.display = 'flex';
+}
+
+function hideAlert() {
+    document.getElementById('alertOverlay').style.display = 'none';
 }
 
 function normalizeBarcode(code) {
@@ -99,21 +138,84 @@ async function parseResponse(response) {
     const raw = await response.text();
 
     if (contentType.includes('application/json')) {
-        try {
-            return JSON.parse(raw);
-        } catch {
-            throw new Error('Invalid JSON response from server.');
-        }
+        try { return JSON.parse(raw); } catch { throw new Error('Invalid JSON response from server.'); }
     }
 
     if (!response.ok) {
-        if (raw.includes('CSRF') || response.status === 403) {
-            throw new Error('Request blocked by CSRF. Refresh page and try again.');
-        }
+        if (raw.includes('CSRF') || response.status === 403) throw new Error('Request blocked by CSRF. Refresh page and try again.');
         throw new Error(`Unexpected non-JSON response (${response.status}).`);
     }
 
     throw new Error('Server returned unexpected response format.');
+}
+
+function splitIngredients(ingredientsText) {
+    return String(ingredientsText || '')
+        .split(/,|;|\.|\(|\)/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function uniqueItems(items) {
+    return [...new Set(items.map((item) => item.toLowerCase()))].map(
+        (lower) => items.find((item) => item.toLowerCase() === lower)
+    );
+}
+
+function classifyIngredients(ingredientsText) {
+    const parts = splitIngredients(ingredientsText);
+
+    const organic = [];
+    const chemical = [];
+    const additive = [];
+
+    for (const ingredient of parts) {
+        const value = ingredient.toLowerCase();
+
+        if (ADDITIVE_KEYWORDS.some((k) => value.includes(k))) {
+            additive.push(ingredient);
+            continue;
+        }
+
+        if (CHEMICAL_KEYWORDS.some((k) => value.includes(k))) {
+            chemical.push(ingredient);
+            continue;
+        }
+
+        if (ORGANIC_KEYWORDS.some((k) => value.includes(k))) {
+            organic.push(ingredient);
+            continue;
+        }
+
+        if (/\be\d{3,4}\b/.test(value)) {
+            additive.push(ingredient);
+        }
+    }
+
+    return {
+        organic: uniqueItems(organic),
+        chemical: uniqueItems(chemical),
+        additive: uniqueItems(additive)
+    };
+}
+
+function renderClassList(elementId, values, emptyLabel) {
+    const el = document.getElementById(elementId);
+    el.innerHTML = '';
+
+    if (!values.length) {
+        const li = document.createElement('li');
+        li.className = 'empty-li';
+        li.textContent = emptyLabel;
+        el.appendChild(li);
+        return;
+    }
+
+    values.forEach((value) => {
+        const li = document.createElement('li');
+        li.textContent = value;
+        el.appendChild(li);
+    });
 }
 
 async function analyzeBarcode(rawBarcode) {
@@ -156,6 +258,11 @@ function renderProductData(data) {
     document.getElementById('barcodeText').textContent = data.barcode;
     document.getElementById('ingredients').textContent = data.ingredients;
 
+    const classes = classifyIngredients(data.ingredients);
+    renderClassList('organicList', classes.organic, 'No clear organic/natural ingredients detected');
+    renderClassList('chemicalList', classes.chemical, 'No clear chemical components detected');
+    renderClassList('additiveList', classes.additive, 'No clear additives/preservatives detected');
+
     const image = document.getElementById('productImage');
     if (data.image) {
         image.src = data.image;
@@ -174,7 +281,7 @@ function renderProductData(data) {
     if (nutritionChart) nutritionChart.destroy();
     nutritionChart = new Chart(document.getElementById('nutritionChart'), {
         type: 'bar',
-        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#f43f5e', '#6366f1', '#14b8a6'] }] },
+        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#4CAF50', '#8BC34A', '#FFC107', '#FF9800', '#F44336', '#3F51B5', '#009688'] }] },
         options: { animation: { duration: 900 }, responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
     });
 }
@@ -256,19 +363,15 @@ async function decodeUploadedImage() {
         candidates = await generateImageCandidates(file);
     } catch {
         showStatus('❌ Unable to read uploaded image.', 'error');
+        showAlert('Display at well litted place and upload a clear barcode image.');
         return;
     }
 
     for (const candidate of candidates) {
         let decoded = null;
 
-        try {
-            decoded = await decodeCanvasWithBarcodeDetector(candidate.canvas);
-        } catch {}
-
-        if (!decoded) {
-            decoded = await decodeCanvasWithQuagga(candidate.canvas);
-        }
+        try { decoded = await decodeCanvasWithBarcodeDetector(candidate.canvas); } catch {}
+        if (!decoded) decoded = await decodeCanvasWithQuagga(candidate.canvas);
 
         if (decoded) {
             showStatus(`✅ Barcode found in ${candidate.tag} region: ${decoded}`, 'success');
@@ -278,6 +381,7 @@ async function decodeUploadedImage() {
     }
 
     showStatus('❌ Could not decode barcode. Try a clearer image, or use manual input.', 'error');
+    showAlert('Display at well litted place and keep barcode straight for better scan.');
 }
 
 function isStableDetection(code) {
@@ -293,6 +397,7 @@ function startScanner() {
     if (activeScanner) return;
     if (!window.Quagga) {
         showStatus('❌ Scanner library failed to load.', 'error');
+        showAlert('Display at well litted place. Scanner library unavailable.');
         return;
     }
 
@@ -315,6 +420,7 @@ function startScanner() {
     }, (err) => {
         if (err) {
             showStatus('❌ Camera unavailable or blocked in this environment.', 'error');
+            showAlert('Display at well litted place and allow camera access.');
             return;
         }
 
@@ -347,13 +453,61 @@ document.getElementById('startScanner').addEventListener('click', startScanner);
 document.getElementById('stopScanner').addEventListener('click', stopScanner);
 document.getElementById('decodeImageBtn').addEventListener('click', decodeUploadedImage);
 document.getElementById('manualSubmitBtn').addEventListener('click', () => analyzeBarcode(document.getElementById('manualBarcode').value));
+document.getElementById('alertCloseBtn').addEventListener('click', hideAlert);
 </script>
 
 <style>
-.hero { margin-bottom: 20px; animation: fadeUp .6s ease; }
+:root {
+    --organic-bg: #e8f5e9;
+    --chemical-bg: #fff8e1;
+    --additive-bg: #fce4ec;
+}
+
+.hero {
+    margin-bottom: 20px;
+    animation: fadeUp .6s ease;
+    background: linear-gradient(135deg, rgba(76, 175, 80, 0.14), rgba(255, 255, 255, 0.92));
+}
+
 .hero p { margin: 0; color: var(--muted); }
-.scan-grid { display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); margin-bottom:20px; }
-.scanner-box { min-height:220px; border:2px dashed #94a3b8; border-radius:12px; margin:12px 0; overflow:hidden; }
+
+.scan-grid {
+    display:grid;
+    gap:20px;
+    grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+    margin-bottom:20px;
+}
+
+.scanner-box {
+    height: 280px;
+    min-height: 280px;
+    max-height: 280px;
+    width: 100%;
+    border:2px dashed #8bc34a;
+    border-radius:12px;
+    margin:12px 0;
+    overflow:hidden;
+    position: relative;
+    background: #f7fff8;
+}
+
+.scanner-box video,
+.scanner-box canvas {
+    position: absolute !important;
+    inset: 0;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover;
+}
+
+.text-input {
+    flex:1;
+    min-width:220px;
+    padding:10px;
+    border-radius:10px;
+    border:1px solid #cbd5e1;
+}
+
 .btn { border:none; padding:10px 15px; border-radius:10px; cursor:pointer; font-weight:600; transition: transform .2s ease; }
 .btn:hover { transform: translateY(-2px); }
 .btn-primary { background:var(--primary); color:white; }
@@ -371,8 +525,62 @@ document.getElementById('manualSubmitBtn').addEventListener('click', () => analy
 .status.info { background:#dbeafe; color:#1e3a8a; }
 .status.success { background:#dcfce7; color:#166534; }
 .status.error { background:#fee2e2; color:#991b1b; }
+
+.classify-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.class-card {
+    border-radius: 12px;
+    padding: 12px;
+    min-height: 140px;
+}
+
+.class-card h4 {
+    margin-top: 0;
+    margin-bottom: 10px;
+}
+
+.class-card ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: .92rem;
+}
+
+.class-card li { margin-bottom: 4px; }
+.empty-li { color: #64748b; font-style: italic; }
+.organic { background: var(--organic-bg); }
+.chemical { background: var(--chemical-bg); }
+.additive { background: var(--additive-bg); }
+
+.alert-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+}
+
+.alert-box {
+    width: min(92vw, 420px);
+    background: #fff;
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.2);
+    text-align: center;
+}
+
 @keyframes popIn { from { transform:scale(.96); opacity:0; } to { transform:scale(1); opacity:1; } }
 @keyframes fadeUp { from { transform:translateY(18px); opacity:0; } to { transform:translateY(0); opacity:1; } }
-@media (max-width:760px) { .status-grid { grid-template-columns:1fr; } .result-header { flex-direction:column; } }
+
+@media (max-width:760px) {
+    .status-grid { grid-template-columns:1fr; }
+    .result-header { flex-direction:column; }
+}
 </style>
 {% endblock %}
