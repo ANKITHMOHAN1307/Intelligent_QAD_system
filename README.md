@@ -1,30 +1,26 @@
 # Intelligent-QAD-System
 
-A Django-based **Smart Food Packet Scanner & Quality Analyzer** web app.
+A Django-based **Smart Food Label OCR Analyzer** web app.
 
 ## What it does
 
-- Scan a packaged food barcode using the **camera**.
-- Upload an image and **decode barcode** from file.
-- Send decoded barcode to **Open Food Facts** (`https://world.openfoodfacts.org/`) and fetch:
-  - Product name and brand
+- Upload a food label image (nutrition table + ingredients panel).
+- Extract OCR text using **OCR.Space Cloud API**.
+- Parse and display:
   - Ingredients list
-  - Nutrient composition
-- Run basic quality checks:
-  - Nutrition-based quality indicator score
-  - Expiry risk status (when expiry metadata is available)
-- Display all results in a visual dashboard with:
-  - Animated cards and status messages
+  - Nutrient composition (normalized to per-100g when possible)
+- Show results in a cleaner dashboard with:
+  - User-friendly upload preview
+  - OCR status feedback
   - Nutrition bar chart
 
 ## Project objective
 
 This project aims to provide a web-based application that allows users to:
 
-1. Scan or upload an image of a packaged food product.
-2. Extract useful information (expiry, manufacturing details when available, ingredients, nutrition).
-3. Analyze if the product is likely safe and whether expiry is near.
-4. View clear quality indicators in an easy dashboard.
+1. Upload an image of a packaged food label.
+2. Extract useful nutrition and ingredient information directly from OCR.
+3. View clear OCR output and nutrition indicators in an easy dashboard.
 
 ## Run locally
 
@@ -34,3 +30,7 @@ python manage.py runserver
 ```
 
 Open `http://127.0.0.1:8000/`.
+
+## Environment variables
+
+- `OCR_SPACE_API_KEY`: Required API key for OCR.Space.

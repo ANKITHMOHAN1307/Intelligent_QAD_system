@@ -2,10 +2,10 @@ import base64
 import json
 import os
 import re
-from urllib import error, request as urllib_request
+from urllib import error, parse, request as urllib_request
 
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
+
 
 
 def _safe_float(value):
@@ -20,6 +20,7 @@ def _safe_float(value):
         return float(cleaned)
     except (ValueError, TypeError):
         return None
+
 
 
 def _normalize_nutrients_per_100g(nutrients):
@@ -61,92 +62,141 @@ def _normalize_nutrients_per_100g(nutrients):
     return normalized
 
 
-def _extract_json(raw_text):
+
+def _extract_ingredients(raw_text):
     if not raw_text:
-        return None
+        return []
 
-    text = raw_text.strip()
+    ingredient_block = ""
+    for line in raw_text.splitlines():
+        if "ingredient" in line.lower():
+            ingredient_block = line
+            break
 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    if not ingredient_block:
+        return []
 
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        return None
-
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    after_colon = ingredient_block.split(":", 1)[-1]
+    candidates = [part.strip() for part in re.split(r",|;", after_colon) if part.strip()]
+    return candidates[:25]
 
 
-def analyze_label_image(image_base64, mime_type="image/jpeg"):
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured.")
 
-    data_url = f"data:{mime_type};base64,{image_base64}"
+def _extract_nutrients(raw_text):
+    if not raw_text:
+        return []
 
-    prompt = (
-        "Read this product label image. Extract OCR text and identify key food-label fields. "
-        "Return strict JSON with keys: raw_text, ingredients (array of strings), "
-        "nutrients (array of objects with name,value,unit,basis). "
-        "For basis use values like 100g, 30g, 100ml, etc. "
-        "If missing, use nulls and empty arrays. No markdown."
-    )
+    nutrients = []
+    nutrient_patterns = {
+        "energy": r"(energy|kcal|calories)",
+        "protein": r"(protein|proteins)",
+        "carbohydrates": r"(carbohydrate|carbohydrates|carbs)",
+        "fat": r"(fat|fats|total fat)",
+        "sugars": r"(sugar|sugars)",
+        "salt": r"(salt|sodium)",
+        "fiber": r"(fiber|fibre)",
+    }
 
-    payload = {
-        "model": OPENAI_MODEL,
-        "temperature": 0.1,
-        "messages": [
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    for line in lines:
+        lower_line = line.lower()
+
+        detected_name = None
+        for canonical, pattern in nutrient_patterns.items():
+            if re.search(pattern, lower_line):
+                detected_name = canonical
+                break
+
+        if not detected_name:
+            continue
+
+        value_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(kcal|kj|g|mg|mcg|µg|ml)?", lower_line)
+        if not value_match:
+            continue
+
+        value = _safe_float(value_match.group(1))
+        unit = (value_match.group(2) or "g").lower()
+
+        basis = "100g"
+        basis_match = re.search(r"(?:per|/)\s*(\d+(?:\.\d+)?)\s*(g|ml)", lower_line)
+        if basis_match:
+            basis = f"{basis_match.group(1)}{basis_match.group(2)}"
+
+        nutrients.append(
             {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
+                "name": detected_name,
+                "value": value,
+                "unit": unit,
+                "basis": basis,
             }
-        ],
-        "response_format": {"type": "json_object"},
-    }
+        )
 
-    req = urllib_request.Request(
-        OPENAI_API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
+    deduped = {}
+    for item in nutrients:
+        deduped[item["name"]] = item
 
-    try:
-        with urllib_request.urlopen(req, timeout=45) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except (error.HTTPError, error.URLError, TimeoutError) as exc:
-        raise RuntimeError("Unable to contact AI OCR service.") from exc
+    return list(deduped.values())
 
-    choices = raw.get("choices") or []
-    if not choices:
-        raise RuntimeError("AI OCR service returned no choices.")
-
-    message_content = choices[0].get("message", {}).get("content", "")
-    parsed = _extract_json(message_content)
-    if not parsed:
-        raise RuntimeError("AI OCR service returned invalid JSON payload.")
-
-    nutrients = parsed.get("nutrients") or []
-
-    return {
-        "raw_text": parsed.get("raw_text") or "",
-        "ingredients": parsed.get("ingredients") or [],
-        "nutrients": nutrients,
-        "nutrition_per_100g": _normalize_nutrients_per_100g(nutrients),
-    }
 
 
 def image_file_to_base64(file_obj):
     binary = file_obj.read()
     return base64.b64encode(binary).decode("utf-8")
+
+
+
+def _ocr_space_read_text(image_base64, api_key):
+    payload = parse.urlencode(
+        {
+            "apikey": api_key,
+            "base64Image": f"data:image/jpeg;base64,{image_base64}",
+            "language": "eng",
+            "isOverlayRequired": "false",
+            "OCREngine": "2",
+            "scale": "true",
+        }
+    ).encode("utf-8")
+
+    req = urllib_request.Request(
+        OCR_SPACE_API_URL,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=45) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Unable to contact OCR.Space service.") from exc
+
+    if parsed.get("IsErroredOnProcessing"):
+        error_message = " ".join(parsed.get("ErrorMessage") or []) or "OCR processing failed."
+        raise RuntimeError(error_message)
+
+    parsed_results = parsed.get("ParsedResults") or []
+    if not parsed_results:
+        raise RuntimeError("OCR.Space returned no parsed results.")
+
+    text = "\n".join(result.get("ParsedText", "") for result in parsed_results).strip()
+    return text
+
+
+
+def analyze_label_image(image_file):
+    api_key = os.getenv("OCR_SPACE_API_KEY")
+    if not api_key:
+        raise ValueError("OCR_SPACE_API_KEY is not configured.")
+
+    image_base64 = image_file_to_base64(image_file)
+    raw_text = _ocr_space_read_text(image_base64=image_base64, api_key=api_key)
+
+    nutrients = _extract_nutrients(raw_text)
+
+    return {
+        "raw_text": raw_text,
+        "ingredients": _extract_ingredients(raw_text),
+        "nutrients": nutrients,
+        "nutrition_per_100g": _normalize_nutrients_per_100g(nutrients),
+    }
