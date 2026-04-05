@@ -1,0 +1,18 @@
+Files edited:
+1) EntryPoint/templates/main.html
+
+What was improved:
+- Upload and Scanner sections now have clear visual separation with dedicated card styles and logic labels.
+- Buttons redesigned with gradient colors, better sizing, hover/active effects, and improved readability.
+- Scanner made more aggressive:
+  - Increased frame processing frequency.
+  - Uses more workers (up to 4 based on hardware).
+- Upload decode made more aggressive:
+  - Keeps full-image decode first.
+  - For crop fallbacks, each crop now has both RAW and ENHANCED versions.
+  - Enhanced version applies grayscale + contrast boost to improve barcode readability.
+
+What to merge:
+- Merge commit hash: use `git log --oneline -n 1`
+- Merge branch: `git checkout <target-branch> && git merge work`
+- Or cherry-pick latest commit from branch `work`.

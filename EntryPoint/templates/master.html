@@ -3,13 +3,44 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{%block title%} {%endblock%}</title>
+    <title>{% block title %}Smart Food Packet Scanner{% endblock %}</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f3f7fb;
+            --card: #ffffff;
+            --ink: #1e293b;
+            --muted: #64748b;
+            --primary: #22c55e;
+            --secondary: #3b82f6;
+            --warn: #f97316;
+            --danger: #ef4444;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+            background: radial-gradient(circle at top right, #dbeafe 0%, var(--bg) 45%);
+            color: var(--ink);
+        }
+
+        .container {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+            padding: 20px;
+        }
+    </style>
 </head>
-{% block content%}
-<body> 
-   
-
-
+<body>
+    {% block content %}{% endblock %}
 </body>
-{%endblock%}
 </html>
