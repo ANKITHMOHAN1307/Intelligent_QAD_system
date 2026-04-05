@@ -1,49 +1,43 @@
 import os
 import json
-import base64
-import easyocr
-import numpy as np
-from PIL import Image
-from io import BytesIO
+import requests
 from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -----------------------------
-# OCR PART (EasyOCR)
+# OCR PART (OCR.Space API)
 # -----------------------------
-reader = easyocr.Reader(['en'], gpu=False)
+def extract_text_from_image(image_path):
+    url = "https://api.ocr.space/parse/image"
 
+    with open(image_path, "rb") as f:
+        response = requests.post(
+            url,
+            files={"file": f},
+            data={
+                "apikey": "K83445173588957",  # replace if needed
+                "language": "eng"
+            }
+        )
 
-def extract_text_from_image(image_file):
-    """
-    Converts uploaded image → raw OCR text
-    """
+    result = response.json()
 
-    image = Image.open(image_file).convert("RGB")
-    image_np = np.array(image)
+    if result.get("IsErroredOnProcessing"):
+        raise Exception(result.get("ErrorMessage"))
 
-    results = reader.readtext(image_np, detail=0)
-
-    raw_text = " ".join(results)
-
-    return raw_text
+    return result["ParsedResults"][0]["ParsedText"]
 
 
 # -----------------------------
 # AI ANALYSIS PART
 # -----------------------------
 def analyze_label_text(raw_text):
-    """
-    Sends OCR text → OpenAI → structured JSON
-    """
-
     prompt = f"""
 Extract structured food label data from the OCR text below.
 
-Return STRICT JSON format:
+Return STRICT JSON:
 {{
-  "raw_text": "...",
   "ingredients": ["..."],
   "nutrients": [
     {{
@@ -61,37 +55,44 @@ OCR TEXT:
 
     response = client.responses.create(
         model="gpt-4.1-mini",
-        input=prompt,
-        text={
-            "format": {
-                "type": "json_object"
-            }
-        }
+        input=prompt
     )
 
-    return json.loads(response.output_text)
+    output_text = ""
+
+    for item in response.output:
+        if hasattr(item, "content"):
+            for c in item.content:
+                if hasattr(c, "text"):
+                    output_text += c.text
+
+    try:
+        return json.loads(output_text)
+    except Exception as e:
+        print("AI RAW OUTPUT:\n", output_text)
+        raise Exception("Invalid JSON from AI")
+
+    
 
 
 # -----------------------------
 # NORMALIZATION
 # -----------------------------
 def normalize_per_100g(nutrients):
-    """
-    Converts all nutrients → per 100g
-    """
-
     normalized = {}
 
     for n in nutrients:
-        name = n["name"].lower()
-        value = float(n["value"])
-        basis = n.get("basis", "per_100g")
+        try:
+            name = n["name"].lower()
+            value = float(n["value"])
+            basis = n.get("basis", "per_100g")
 
-        if basis == "per_serving":
-            # Assume 1 serving = 30g (can be improved later)
-            value = value * (100 / 30)
+            if basis == "per_serving":
+                value = value * (100 / 30)
 
-        normalized[name] = round(value, 2)
+            normalized[name] = round(value, 2)
+        except:
+            continue
 
     return normalized
 
@@ -99,13 +100,9 @@ def normalize_per_100g(nutrients):
 # -----------------------------
 # MAIN PIPELINE
 # -----------------------------
-def process_food_label(image_file):
-    """
-    Full pipeline:
-    Image → OCR → AI → Clean Output
-    """
+def process_food_label(image_path):
 
-    raw_text = extract_text_from_image(image_file)
+    raw_text = extract_text_from_image(image_path)
 
     ai_data = analyze_label_text(raw_text)
 
@@ -117,3 +114,11 @@ def process_food_label(image_file):
         "nutrients": nutrients,
         "nutrition_per_100g": normalize_per_100g(nutrients),
     }
+
+
+# -----------------------------
+# RUN
+# -----------------------------
+if __name__ == "__main__":
+    result = process_food_label("C:/PROJECT/Intelligent-QAD-System/nutrition_en.8.full.jpg")
+    print(json.dumps(result, indent=2))

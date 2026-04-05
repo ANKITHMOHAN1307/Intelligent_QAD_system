@@ -126,11 +126,11 @@ function analyzeLabelWithOCR(file) {
     })
     .then((response) => response.json().then(data => ({ ok: response.ok, data })))
     .then(({ ok, data }) => {
-        if (!ok || data.status !== 'success') {
+        if (!ok ) {
             throw new Error(data.message || 'Unable to run OCR analysis.');
         }
         renderProductData(data);
-        document.getElementById('ocrText').textContent = data.ocr_text || 'Not available';
+        document.getElementById('ocrText').textContent = data.raw_text || 'Not available';
         showStatus('✅ OCR analysis completed successfully.', 'success');
     })
     .catch((err) => {
