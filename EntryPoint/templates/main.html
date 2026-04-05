@@ -84,17 +84,60 @@ function analyzeBarcode(barcode) {
         },
         body: JSON.stringify({ barcode })
     })
-    .then((response) => response.json().then(data => ({ ok: response.ok, data })))
+    .then(response => response.json().then(data => ({ ok: response.ok, data })))
     .then(({ ok, data }) => {
-        if (!ok || data.status !== 'success') {
+        if (!ok) {
+            throw new Error(data.message || 'Server error.');
+        }
+
+        if (data.status === 'success') {
+            renderProductData(data);
+            showStatus('✅ Product analysis completed successfully.', 'success');
+
+        } else if (data.status === 'fallback') {
+            // ✅ Barcode not found — Celery task queued, poll for result
+            showStatus('⏳ Barcode not found in database. OCR task queued...', 'info');
+            pollTaskStatus(data.task_id);
+
+        } else {
             throw new Error(data.message || 'Unable to fetch product details.');
         }
-        renderProductData(data);
-        showStatus('✅ Product analysis completed successfully.', 'success');
     })
-    .catch((err) => {
-        showStatus(`❌ ${err.message}`, 'error');
-    });
+    .catch(err => showStatus(`❌ ${err.message}`, 'error'));
+}
+
+function pollTaskStatus(taskId) {
+    let attempsts = 0;
+    const maxAttempts = 15;
+    const interval = setInterval(() => {
+        attempsts++;
+        if (attempsts>maxAttempts){
+            clearInterval(interval);
+            showStatus('X OCR task timed out','error');
+        }
+        fetch(`/task-status/${taskId}/`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'SUCCESS') {
+                clearInterval(interval);
+                showStatus('✅ OCR task completed.', 'success');
+                console.log('OCR Result:', data.result);
+                // When you merge OCR branch, call renderProductData(data.result) here
+
+            } else if (data.status === 'FAILURE') {
+                clearInterval(interval);
+                showStatus('❌ OCR task failed.', 'error');
+
+            } else {
+                // Still PENDING or STARTED — keep polling
+                showStatus(`⏳ OCR task status: ${data.status}...`, 'info');
+            }
+        })
+        .catch(() => {
+            clearInterval(interval);
+            showStatus('❌ Could not check task status.', 'error');
+        });
+    }, 2000); // poll every 2 seconds
 }
 
 function renderProductData(data) {
@@ -208,12 +251,37 @@ function decodeUploadedImage() {
         }
     }, function(result) {
         URL.revokeObjectURL(imageUrl);
+
         if (result && result.codeResult) {
+            // ✅ Barcode found — proceed normally
             analyzeBarcode(result.codeResult.code);
         } else {
-            showStatus('❌ Could not decode barcode from uploaded image.', 'error');
+            // ✅ Barcode not found — queue Celery OCR task directly
+            showStatus('⏳ Barcode not detected. Queuing OCR task...', 'info');
+            triggerOCRFallback();
         }
     });
+}
+
+function triggerOCRFallback() {
+    fetch('{% url "analyze_barcode" %}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({ barcode: 'OCR_FALLBACK' })  // ← signal to backend
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.status === 'fallback' && data.task_id) {
+            showStatus('⏳ OCR task queued. Waiting for result...', 'info');
+            pollTaskStatus(data.task_id);
+        } else {
+            showStatus('❌ Could not start OCR task.', 'error');
+        }
+    })
+    .catch(() => showStatus('❌ OCR trigger failed.', 'error'));
 }
 
 document.getElementById('startScanner').addEventListener('click', startScanner);

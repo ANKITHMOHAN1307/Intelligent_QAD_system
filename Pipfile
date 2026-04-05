@@ -5,10 +5,15 @@ name = "pypi"
 
 [packages]
 django = "*"
-celery = "*"
+celery = {extras = ["redis"], version = "*"}
 redis = "*"
-celery = {extras = ['redis'], version = "*"]
-redis = "*"
+groq = "*"
+python-dotenv = "*"
+requests = "*"
+django-celery-results = "*"
+django-celery-resultspython = "*"
+"manage.py" = "*"
+migrate = "*"
 
 [dev-packages]
 
