@@ -179,37 +179,17 @@ function classifyIngredients(ingredientsText) {
             organic.push(ingredient);
             continue;
         }
-    }
-    return cookieValue;
-}
 
-async function parseResponse(response) {
-    const contentType = response.headers.get('content-type') || '';
-    const raw = await response.text();
-
-    if (contentType.includes('application/json')) {
-        try { return JSON.parse(raw); } catch { throw new Error('Invalid JSON response from server.'); }
+        if (/\be\d{3,4}\b/.test(value)) {
+            additive.push(ingredient);
+        }
     }
 
-    if (!response.ok) {
-        if (raw.includes('CSRF') || response.status === 403) throw new Error('Request blocked by CSRF. Refresh page and try again.');
-        throw new Error(`Unexpected non-JSON response (${response.status}).`);
-    }
-
-    throw new Error('Server returned unexpected response format.');
-}
-
-function splitIngredients(ingredientsText) {
-    return String(ingredientsText || '')
-        .split(/,|;|\.|\(|\)/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-}
-
-function uniqueItems(items) {
-    return [...new Set(items.map((item) => item.toLowerCase()))].map(
-        (lower) => items.find((item) => item.toLowerCase() === lower)
-    );
+    return {
+        organic: uniqueItems(organic),
+        chemical: uniqueItems(chemical),
+        additive: uniqueItems(additive)
+    };
 }
 
 function renderClassList(elementId, values, emptyLabel) {
@@ -340,6 +320,35 @@ async function decodeCanvasWithBarcodeDetector(canvas) {
     return codes.length ? normalizeBarcode(codes[0].rawValue) : null;
 }
 
+async function decodeOriginalWithBarcodeDetector(file) {
+    if (!(window.BarcodeDetector && 'createImageBitmap' in window)) return null;
+    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
+    const bitmap = await createImageBitmap(file);
+    const codes = await detector.detect(bitmap);
+    return codes.length ? normalizeBarcode(codes[0].rawValue) : null;
+}
+
+function decodeOriginalWithQuagga(file) {
+    return new Promise((resolve) => {
+        if (!window.Quagga) {
+            resolve(null);
+            return;
+        }
+        const imageUrl = URL.createObjectURL(file);
+        Quagga.decodeSingle({
+            src: imageUrl,
+            numOfWorkers: 0,
+            locate: true,
+            locator: { patchSize: 'medium', halfSample: true },
+            decoder: { readers: BARCODE_READERS },
+            inputStream: { size: 1400 },
+        }, (result) => {
+            URL.revokeObjectURL(imageUrl);
+            resolve(result && result.codeResult ? normalizeBarcode(result.codeResult.code) : null);
+        });
+    });
+}
+
 function decodeCanvasWithQuagga(canvas) {
     return new Promise((resolve) => {
         if (!window.Quagga) {
@@ -369,8 +378,20 @@ async function decodeUploadedImage() {
     }
 
     const file = fileInput.files[0];
-    showStatus('Checking uploaded image for barcode...', 'info');
+    showStatus('Decoding uploaded barcode...', 'info');
 
+    // Pass 1: full image decode (most common success path)
+    let decoded = null;
+    try { decoded = await decodeOriginalWithBarcodeDetector(file); } catch {}
+    if (!decoded) decoded = await decodeOriginalWithQuagga(file);
+
+    if (decoded) {
+        showStatus(`✅ Barcode decoded: ${decoded}`, 'success');
+        analyzeBarcode(decoded);
+        return;
+    }
+
+    // Pass 2: lower-region candidates for text-heavy packaging
     let candidates;
     try {
         candidates = await generateImageCandidates(file);
@@ -381,20 +402,19 @@ async function decodeUploadedImage() {
     }
 
     for (const candidate of candidates) {
-        let decoded = null;
+        let cropDecoded = null;
+        try { cropDecoded = await decodeCanvasWithBarcodeDetector(candidate.canvas); } catch {}
+        if (!cropDecoded) cropDecoded = await decodeCanvasWithQuagga(candidate.canvas);
 
-        try { decoded = await decodeCanvasWithBarcodeDetector(candidate.canvas); } catch {}
-        if (!decoded) decoded = await decodeCanvasWithQuagga(candidate.canvas);
-
-        if (decoded) {
-            showStatus(`✅ Barcode found in ${candidate.tag} region: ${decoded}`, 'success');
-            analyzeBarcode(decoded);
+        if (cropDecoded) {
+            showStatus(`✅ Barcode found in ${candidate.tag} region: ${cropDecoded}`, 'success');
+            analyzeBarcode(cropDecoded);
             return;
         }
     }
 
-    showStatus('❌ Could not decode barcode. Try a clearer image, or use manual input.', 'error');
-    showAlert('Could not read barcode from upload. Try a closer and clearer barcode image.');
+    showStatus('❌ Could not decode barcode from upload.', 'error');
+    showAlert('Could not read barcode. Keep barcode large, straight, and well-lit.');
 }
 
 function isStableDetection(code) {
@@ -403,7 +423,7 @@ function isStableDetection(code) {
     recentDetections.push({ code, ts: now });
 
     const matches = recentDetections.filter((item) => item.code === code);
-    return matches.length >= 2;
+    return matches.length >= 1;
 }
 
 function startScanner() {
@@ -439,7 +459,7 @@ function startScanner() {
 
         Quagga.start();
         activeScanner = true;
-        showStatus('Scanner started. Scanning full frame including lower area for barcodes...', 'info');
+        showStatus('Scanner started. Point camera to barcode and hold steady...', 'info');
 
         if (!onDetectedHandlerAttached) {
             Quagga.onDetected((result) => {
