@@ -1,12 +1,13 @@
 {% extends "master.html" %}
-{% block title %}SFPSQA Dashboard{% endblock %}
+{% block title %}Smart Food Packet Scanner{% endblock %}
 
 {% block content %}
 <div class="container">
     {% csrf_token %}
+
     <header class="hero card">
         <h1>🌿 Smart Food Packet Scanner</h1>
-        <p>Scan via camera, upload image, or enter barcode manually.</p>
+        <p>Scan barcode first using camera or upload. If barcode fails, OCR analysis will run automatically.</p>
     </header>
 
     <section class="scan-grid">
@@ -22,30 +23,32 @@
         <article class="card pop upload-card">
             <h2>🖼️ Upload Barcode Image</h2>
             <input type="file" id="imageInput" accept="image/*" />
+
+            <div class="preview-box">
+                <img id="previewImage" style="display:none;" alt="Preview" />
+                <p id="previewPlaceholder" class="small">Image preview will appear here.</p>
+            </div>
+
             <div class="actions">
                 <button id="decodeImageBtn" class="btn btn-secondary">Decode Uploaded Image</button>
+                <button id="clearBtn" class="btn">Clear</button>
             </div>
-            <p class="small">Tip: Upload a clear, straight barcode image with good lighting.</p>
+
+            <p class="small">Tip: Upload a clear barcode image with good lighting.</p>
         </article>
     </section>
 
     <section class="card result-panel" id="resultPanel" style="display:none;">
-        <div class="result-header">
-            <div>
-                <h2 id="productName">Product</h2>
-                <p id="brandName" class="small"></p>
-                <p><strong>Barcode:</strong> <span id="barcodeText"></span></p>
-            </div>
-            <img id="productImage" alt="Product" />
-        </div>
+        <h2 id="productName">Product Analysis</h2>
+        <p id="brandName" class="small"></p>
 
         <div class="status-grid">
             <div class="pill" id="qualityPill"></div>
-            <div class="pill" id="expiryPill"></div>
+            <div class="pill" id="modePill"></div>
         </div>
 
         <h3>Ingredients</h3>
-        <p id="ingredients"></p>
+        <p id="ingredients">Not available</p>
 
         <h3>Ingredient Classification</h3>
         <div class="classify-grid">
@@ -63,61 +66,34 @@
             </div>
         </div>
 
-        <h3>Nutritional Composition (per 100g)</h3>
+        <h3>Nutritional Composition</h3>
         <canvas id="nutritionChart" height="120"></canvas>
+
+        <h3>OCR Extracted Text</h3>
+        <pre id="ocrText" class="ocr-text">Not available</pre>
     </section>
 
     <div id="statusMessage" class="status"></div>
 </div>
 
-<div id="alertOverlay" class="alert-overlay" style="display:none;">
-    <div class="alert-box">
-        <h3>📸 Scanning Tip</h3>
-        <p id="alertText">Display at well litted place.</p>
-        <button id="alertCloseBtn" class="btn btn-primary">Got it</button>
-    </div>
-</div>
-
 <script src="https://unpkg.com/quagga@0.12.1/dist/quagga.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-let activeScanner = false;
 let nutritionChart = null;
-let onDetectedHandlerAttached = false;
-let recentDetections = [];
 
-const BARCODE_READERS = ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'];
-
-const ORGANIC_KEYWORDS = ['water', 'milk', 'wheat', 'rice', 'corn', 'oats', 'salt', 'sugar', 'honey', 'cocoa', 'fruit', 'vegetable', 'tomato', 'onion', 'garlic', 'ginger', 'turmeric', 'pepper', 'coconut', 'almond', 'peanut'];
-const CHEMICAL_KEYWORDS = ['carbonate', 'sulfate', 'phosphate', 'chloride', 'hydroxide', 'sodium', 'potassium', 'calcium', 'magnesium', 'nitrite', 'nitrate', 'acid', 'monosodium glutamate', 'msg'];
-const ADDITIVE_KEYWORDS = ['preservative', 'stabilizer', 'emulsifier', 'colour', 'color', 'flavour', 'flavor', 'sweetener', 'e100', 'e101', 'e102', 'e110', 'e120', 'e200', 'e211', 'e250', 'e330', 'sorbate', 'benzoate'];
-
-function showStatus(message, variant = 'info') {
-    const el = document.getElementById('statusMessage');
+function showStatus(message, variant = "info") {
+    const el = document.getElementById("statusMessage");
     el.className = `status show ${variant}`;
     el.textContent = message;
 }
 
-function showAlert(message) {
-    document.getElementById('alertText').textContent = message;
-    document.getElementById('alertOverlay').style.display = 'flex';
-}
-
-function hideAlert() {
-    document.getElementById('alertOverlay').style.display = 'none';
-}
-
-function normalizeBarcode(code) {
-    return String(code || '').replace(/\s+/g, '').trim();
-}
-
 function getCookie(name) {
     let cookieValue = null;
-    if (document.cookie && document.cookie !== '') {
-        const cookies = document.cookie.split(';');
+    if (document.cookie && document.cookie !== "") {
+        const cookies = document.cookie.split(";");
         for (let cookie of cookies) {
             cookie = cookie.trim();
-            if (cookie.startsWith(name + '=')) {
+            if (cookie.startsWith(name + "=")) {
                 cookieValue = decodeURIComponent(cookie.slice(name.length + 1));
                 break;
             }
@@ -126,565 +102,157 @@ function getCookie(name) {
     return cookieValue;
 }
 
-async function parseResponse(response) {
-    const contentType = response.headers.get('content-type') || '';
-    const raw = await response.text();
-
-    if (contentType.includes('application/json')) {
-        try { return JSON.parse(raw); } catch { throw new Error('Invalid JSON response from server.'); }
-    }
-
-    if (!response.ok) {
-        if (raw.includes('CSRF') || response.status === 403) throw new Error('Request blocked by CSRF. Refresh page and try again.');
-        throw new Error(`Unexpected non-JSON response (${response.status}).`);
-    }
-
-    throw new Error('Server returned unexpected response format.');
+function normalizeBarcode(code) {
+    return String(code || "").replace(/\s+/g, "").trim();
 }
 
-function splitIngredients(ingredientsText) {
-    return String(ingredientsText || '')
-        .split(/,|;|\.|\(|\)/)
-        .map((item) => item.trim())
-        .filter(Boolean);
+function showPreview(file) {
+    const img = document.getElementById("previewImage");
+    const placeholder = document.getElementById("previewPlaceholder");
+
+    const url = URL.createObjectURL(file);
+    img.src = url;
+    img.style.display = "block";
+    placeholder.style.display = "none";
 }
 
-function uniqueItems(items) {
-    return [...new Set(items.map((item) => item.toLowerCase()))].map(
-        (lower) => items.find((item) => item.toLowerCase() === lower)
-    );
+function clearForm() {
+    document.getElementById("imageInput").value = "";
+    document.getElementById("previewImage").style.display = "none";
+    document.getElementById("previewPlaceholder").style.display = "block";
+    document.getElementById("resultPanel").style.display = "none";
+    document.getElementById("statusMessage").className = "status";
 }
 
-function classifyIngredients(ingredientsText) {
-    const parts = splitIngredients(ingredientsText);
-
-    const organic = [];
-    const chemical = [];
-    const additive = [];
-
-    for (const ingredient of parts) {
-        const value = ingredient.toLowerCase();
-
-        if (ADDITIVE_KEYWORDS.some((k) => value.includes(k))) {
-            additive.push(ingredient);
-            continue;
-        }
-
-        if (CHEMICAL_KEYWORDS.some((k) => value.includes(k))) {
-            chemical.push(ingredient);
-            continue;
-        }
-
-        if (ORGANIC_KEYWORDS.some((k) => value.includes(k))) {
-            organic.push(ingredient);
-            continue;
-        }
-
-        if (/\be\d{3,4}\b/.test(value)) {
-            additive.push(ingredient);
-        }
-    }
-
-    return {
-        organic: uniqueItems(organic),
-        chemical: uniqueItems(chemical),
-        additive: uniqueItems(additive)
-    };
-}
-
-function renderClassList(elementId, values, emptyLabel) {
-    const el = document.getElementById(elementId);
-    el.innerHTML = '';
-
-    if (!values.length) {
-        const li = document.createElement('li');
-        li.className = 'empty-li';
-        li.textContent = emptyLabel;
-        el.appendChild(li);
+function handleOCRFallback(file) {
+    if (!file) {
+        showStatus("❌ No image available for OCR fallback.", "error");
         return;
     }
 
-    values.forEach((value) => {
-        const li = document.createElement('li');
-        li.textContent = value;
-        el.appendChild(li);
+    showStatus("⏳ Barcode failed. Starting OCR analysis...", "info");
+
+    const formData = new FormData();
+    formData.append("image", file, file.name || "label.jpg");
+
+    fetch('{% url "analyze_ocr_label" %}', {
+        method: "POST",
+        headers: {
+            "X-CSRFToken": getCookie("csrftoken")
+        },
+        body: formData
+    })
+    .then(response => response.json().then(data => ({ ok: response.ok, data })))
+    .then(({ ok, data }) => {
+        if (!ok || data.status !== "success") {
+            throw new Error(data.message || "OCR analysis failed.");
+        }
+
+        renderProductData(data);
+        showStatus("✅ OCR analysis completed successfully.", "success");
+    })
+    .catch(error => {
+        showStatus(`❌ ${error.message}`, "error");
     });
 }
 
-async function analyzeBarcode(rawBarcode) {
-    const barcode = normalizeBarcode(rawBarcode);
+function analyzeBarcode(barcode, file = null) {
+    barcode = normalizeBarcode(barcode);
+
     if (!barcode) {
-        showStatus('❌ Barcode is empty.', 'error');
+        handleOCRFallback(file);
         return;
     }
 
-    showStatus(`Barcode decoded: ${barcode}. Fetching product data...`, 'info');
+    showStatus(`Barcode detected: ${barcode}. Fetching product data...`, "info");
 
     fetch('{% url "analyze_barcode" %}', {
-        method: 'POST',
+        method: "POST",
         headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCookie('csrftoken')
+            "Content-Type": "application/json",
+            "X-CSRFToken": getCookie("csrftoken")
         },
         body: JSON.stringify({ barcode })
     })
     .then(response => response.json().then(data => ({ ok: response.ok, data })))
     .then(({ ok, data }) => {
         if (!ok) {
-            throw new Error(data.message || 'Server error.');
+            throw new Error(data.message || "Server error");
         }
 
-        if (data.status === 'success') {
+        if (data.status === "success") {
             renderProductData(data);
-            showStatus('✅ Product analysis completed successfully.', 'success');
-
-        } else if (data.status === 'fallback') {
-            // ✅ Barcode not found — Celery task queued, poll for result
-            showStatus('⏳ Barcode not found in database. OCR task queued...', 'info');
-            pollTaskStatus(data.task_id);
-
+            showStatus("✅ Product analysis completed.", "success");
         } else {
-            throw new Error(data.message || 'Unable to fetch product details.');
+            handleOCRFallback(file);
         }
     })
-    .catch(err => showStatus(`❌ ${err.message}`, 'error'));
-}
-
-function pollTaskStatus(taskId) {
-    let attempts = 0;
-    const maxAttempts = 15;
-    const interval = setInterval(() => {
-        attempts++;
-        if (attempts>maxAttempts){
-            clearInterval(interval);
-            showStatus('❌ OCR task timed out','error');
-            return;
-        }
-        fetch(`/task-status/${taskId}/`)
-        .then(r => r.json())
-        .then(data => {
-            if (data.status === 'SUCCESS') {
-                clearInterval(interval);
-                showStatus('✅ OCR task completed.', 'success');
-                console.log('OCR Result:', data.result);
-                // When you merge OCR branch, call renderProductData(data.result) here
-
-            } else if (data.status === 'FAILURE') {
-                clearInterval(interval);
-                showStatus('❌ OCR task failed.', 'error');
-
-            } else {
-                // Still PENDING or STARTED — keep polling
-                showStatus(`⏳ OCR task status: ${data.status}...`, 'info');
-            }
-        })
-        .catch(() => {
-            clearInterval(interval);
-            showStatus('❌ Could not check task status.', 'error');
-        });
-    }, 2000); // poll every 2 seconds
-    
+    .catch(() => {
+        handleOCRFallback(file);
+    });
 }
 
 function renderProductData(data) {
-    document.getElementById('resultPanel').style.display = 'block';
-    document.getElementById('productName').textContent = data.product_name;
-    document.getElementById('brandName').textContent = `Brand: ${data.brand}`;
-    document.getElementById('barcodeText').textContent = data.barcode;
-    document.getElementById('ingredients').textContent = data.ingredients;
+    document.getElementById("resultPanel").style.display = "block";
+    document.getElementById("productName").textContent = data.product_name || "OCR Label Analysis";
+    document.getElementById("brandName").textContent = data.brand || "";
 
-    const classes = classifyIngredients(data.ingredients);
-    renderClassList('organicList', classes.organic, 'No clear organic/natural ingredients detected');
-    renderClassList('chemicalList', classes.chemical, 'No clear chemical components detected');
-    renderClassList('additiveList', classes.additive, 'No clear additives/preservatives detected');
+    document.getElementById("ingredients").textContent =
+        Array.isArray(data.ingredients)
+            ? data.ingredients.join(", ")
+            : (data.ingredients || "Not available");
 
-    const image = document.getElementById('productImage');
-    if (data.image) {
-        image.src = data.image;
-        image.style.display = 'block';
-    } else {
-        image.style.display = 'none';
-    }
+    document.getElementById("ocrText").textContent = data.ocr_text || "Not available";
 
-    document.getElementById('qualityPill').textContent = `Quality: ${data.quality.quality} (${data.quality.score}/100) · ${data.quality.message}`;
-    document.getElementById('expiryPill').textContent = `Expiry: ${data.expiry.status} · ${data.expiry.message}`;
+    document.getElementById("qualityPill").textContent =
+        data.quality ? `Output: ${data.quality.quality}` : "Output: Available";
 
-    const n = data.nutrition;
-    const labels = ['Energy kcal', 'Protein', 'Carbs', 'Fat', 'Sugar', 'Salt', 'Fiber'];
-    const values = [n.energy_kcal_100g, n.proteins_100g, n.carbohydrates_100g, n.fat_100g, n.sugars_100g, n.salt_100g, n.fiber_100g].map((v) => Number(v || 0));
-
-    if (nutritionChart) nutritionChart.destroy();
-    nutritionChart = new Chart(document.getElementById('nutritionChart'), {
-        type: 'bar',
-        data: { labels, datasets: [{ data: values, borderRadius: 8, backgroundColor: ['#4CAF50', '#8BC34A', '#FFC107', '#FF9800', '#F44336', '#3F51B5', '#009688'] }] },
-        options: { animation: { duration: 900 }, responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
-    });
-}
-
-async function generateImageCandidates(file) {
-    const bitmap = await createImageBitmap(file);
-    const w = bitmap.width;
-    const h = bitmap.height;
-
-    const areas = [
-        { x: 0, y: 0, w: 1, h: 1, tag: 'full' },
-        { x: 0, y: 0.55, w: 1, h: 0.45, tag: 'bottom-45' },
-        { x: 0, y: 0.65, w: 1, h: 0.35, tag: 'bottom-35' },
-        { x: 0.05, y: 0.50, w: 0.9, h: 0.45, tag: 'bottom-center' },
-        { x: 0.1, y: 0.4, w: 0.8, h: 0.5, tag: 'lower-middle' }
-    ];
-
-    const candidates = [];
-    for (const area of areas) {
-        const sx = Math.floor(w * area.x);
-        const sy = Math.floor(h * area.y);
-        const sw = Math.max(32, Math.floor(w * area.w));
-        const sh = Math.max(32, Math.floor(h * area.h));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = sw;
-        canvas.height = sh;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
-
-        candidates.push({ tag: area.tag, canvas });
-    }
-
-    return candidates;
-}
-
-async function decodeCanvasWithBarcodeDetector(canvas) {
-    if (!(window.BarcodeDetector && 'createImageBitmap' in window)) return null;
-
-    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-    const bitmap = await createImageBitmap(canvas);
-    const codes = await detector.detect(bitmap);
-    return codes.length ? normalizeBarcode(codes[0].rawValue) : null;
-}
-
-async function decodeOriginalWithBarcodeDetector(file) {
-    if (!(window.BarcodeDetector && 'createImageBitmap' in window)) return null;
-    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-    const bitmap = await createImageBitmap(file);
-    const codes = await detector.detect(bitmap);
-    return codes.length ? normalizeBarcode(codes[0].rawValue) : null;
-}
-
-function decodeOriginalWithQuagga(file) {
-    return new Promise((resolve) => {
-        if (!window.Quagga) {
-            resolve(null);
-            return;
-        }
-        const imageUrl = URL.createObjectURL(file);
-        Quagga.decodeSingle({
-            src: imageUrl,
-            numOfWorkers: 0,
-            locate: true,
-            locator: { patchSize: 'medium', halfSample: true },
-            decoder: { readers: BARCODE_READERS },
-            inputStream: { size: 1400 },
-        }, (result) => {
-            URL.revokeObjectURL(imageUrl);
-            resolve(result && result.codeResult ? normalizeBarcode(result.codeResult.code) : null);
-        });
-    });
-}
-
-function decodeCanvasWithQuagga(canvas) {
-    return new Promise((resolve) => {
-        if (!window.Quagga) {
-            resolve(null);
-            return;
-        }
-
-        const imageUrl = canvas.toDataURL('image/png');
-        Quagga.decodeSingle({
-            src: imageUrl,
-            numOfWorkers: 0,
-            locate: true,
-            locator: { patchSize: 'large', halfSample: false },
-            decoder: { readers: BARCODE_READERS },
-            inputStream: { size: 1200 },
-        }, (result) => {
-            resolve(result && result.codeResult ? normalizeBarcode(result.codeResult.code) : null);
-        });
-    });
+    document.getElementById("modePill").textContent =
+        data.expiry ? `Mode: ${data.expiry.status}` : "Mode: Analysis";
 }
 
 async function decodeUploadedImage() {
-    const fileInput = document.getElementById('imageInput');
+    const fileInput = document.getElementById("imageInput");
+
     if (!fileInput.files.length) {
-        showStatus('❌ Please select an image first.', 'error');
+        showStatus("❌ Please select an image first.", "error");
         return;
     }
 
     const file = fileInput.files[0];
-    showStatus('Decoding uploaded barcode...', 'info');
+    showStatus("Trying barcode detection...", "info");
 
-    // Pass 1: full image decode (most common success path)
-    let decoded = null;
-    try { decoded = await decodeOriginalWithBarcodeDetector(file); } catch {}
-    if (!decoded) decoded = await decodeOriginalWithQuagga(file);
-
-    if (decoded) {
-        showStatus(`✅ Barcode decoded: ${decoded}`, 'success');
-        analyzeBarcode(decoded);
-        return;
-    }
-
-    // Pass 2: lower-region candidates for text-heavy packaging
-    let candidates;
-    try {
-        candidates = await generateImageCandidates(file);
-    } catch {
-        showStatus('❌ Unable to read uploaded image.', 'error');
-        showAlert('Upload a clear barcode image with good lighting.');
-        showStatus('⏳ Barcode decoding failed. Queuing OCR task...', 'info');
-        triggerOCRFallback();
-        return;
-    }
-
-    for (const candidate of candidates) {
-        let cropDecoded = null;
-        try { cropDecoded = await decodeCanvasWithBarcodeDetector(candidate.canvas); } catch {}
-        if (!cropDecoded) cropDecoded = await decodeCanvasWithQuagga(candidate.canvas);
-
-        if (cropDecoded) {
-            showStatus(`✅ Barcode found in ${candidate.tag} region: ${cropDecoded}`, 'success');
-            analyzeBarcode(cropDecoded);
-            return;
-        }
-    }
-
-    showStatus('⏳ Could not decode barcode from upload. Queuing OCR task...', 'info');
-    showAlert('Could not read barcode. Keep barcode large, straight, and well-lit.');
-    triggerOCRFallback();
-}
-
-function isStableDetection(code) {
-    const now = Date.now();
-    recentDetections = recentDetections.filter((item) => now - item.ts < 2000);
-    recentDetections.push({ code, ts: now });
-
-    const matches = recentDetections.filter((item) => item.code === code);
-    return matches.length >= 1;
-}
-
-function startScanner() {
-    if (activeScanner) return;
     if (!window.Quagga) {
-        showStatus('❌ Scanner library failed to load.', 'error');
-        showAlert('Display at well litted place. Scanner library unavailable.');
+        handleOCRFallback(file);
         return;
     }
 
-    Quagga.init({
-        inputStream: {
-            type: 'LiveStream',
-            constraints: {
-                facingMode: { ideal: 'environment' },
-                width: { min: 640, ideal: 1280 },
-                height: { min: 480, ideal: 720 }
-            },
-            target: document.getElementById('scanner'),
-            area: { top: '0%', right: '0%', left: '0%', bottom: '0%' }
-        },
+    const imageUrl = URL.createObjectURL(file);
+
+    Quagga.decodeSingle({
+        src: imageUrl,
+        numOfWorkers: 0,
         locate: true,
-        numOfWorkers: 2,
-        locator: { patchSize: 'large', halfSample: false },
-        decoder: { readers: BARCODE_READERS },
-        frequency: 8,
-    }, (err) => {
-        if (err) {
-            showStatus('❌ Camera unavailable or blocked in this environment.', 'error');
-            showAlert('Display at well litted place and allow camera access.');
-            return;
+        decoder: {
+            readers: ["ean_reader", "upc_reader", "code_128_reader"]
         }
+    }, function(result) {
+        URL.revokeObjectURL(imageUrl);
 
-        Quagga.start();
-        activeScanner = true;
-        showStatus('Scanner started. Point camera to barcode and hold steady...', 'info');
-
-        if (!onDetectedHandlerAttached) {
-            Quagga.onDetected((result) => {
-                const code = normalizeBarcode(result?.codeResult?.code);
-                if (code && isStableDetection(code)) {
-                    stopScanner();
-                    analyzeBarcode(code);
-                }
-            });
-            onDetectedHandlerAttached = true;
+        if (result && result.codeResult) {
+            analyzeBarcode(result.codeResult.code, file);
+        } else {
+            handleOCRFallback(file);
         }
     });
 }
 
-function stopScanner() {
-    if (activeScanner) {
-        Quagga.stop();
-        activeScanner = false;
-        showStatus('Scanner stopped.', 'info');
-    }
-}
+document.getElementById("imageInput").addEventListener("change", function(e) {
+    const file = e.target.files[0];
+    if (file) showPreview(file);
+});
 
-function triggerOCRFallback() {
-    fetch('{% url "analyze_barcode" %}', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCookie('csrftoken')
-        },
-        body: JSON.stringify({ barcode: 'OCR_FALLBACK' })  // ← signal to backend
-    })
-    .then(r => r.json())
-    .then(data => {
-        if (data.status === 'fallback' && data.task_id) {
-            showStatus('⏳ OCR task queued. Waiting for result...', 'info');
-            pollTaskStatus(data.task_id);
-        } else {
-            showStatus('❌ Could not start OCR task.', 'error');
-        }
-    })
-    .catch(() => showStatus('❌ OCR trigger failed.', 'error'));
-}
-
-document.getElementById('startScanner').addEventListener('click', startScanner);
-document.getElementById('stopScanner').addEventListener('click', stopScanner);
-document.getElementById('decodeImageBtn').addEventListener('click', decodeUploadedImage);
-document.getElementById('alertCloseBtn').addEventListener('click', hideAlert);
+document.getElementById("decodeImageBtn").addEventListener("click", decodeUploadedImage);
+document.getElementById("clearBtn").addEventListener("click", clearForm);
 </script>
-
-<style>
-:root {
-    --organic-bg: #e8f5e9;
-    --chemical-bg: #fff8e1;
-    --additive-bg: #fce4ec;
-}
-
-.hero {
-    margin-bottom: 20px;
-    animation: fadeUp .6s ease;
-    background: linear-gradient(135deg, rgba(76, 175, 80, 0.14), rgba(255, 255, 255, 0.92));
-}
-
-.hero p { margin: 0; color: var(--muted); }
-
-.scan-grid {
-    display:grid;
-    gap:20px;
-    grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
-    margin-bottom:20px;
-}
-
-.scanner-box {
-    height: 280px;
-    min-height: 280px;
-    max-height: 280px;
-    width: 100%;
-    border:2px dashed #8bc34a;
-    border-radius:12px;
-    margin:12px 0;
-    overflow:hidden;
-    position: relative;
-    background: #f7fff8;
-}
-
-.scanner-box video,
-.scanner-box canvas {
-    position: absolute !important;
-    inset: 0;
-    width: 100% !important;
-    height: 100% !important;
-    object-fit: cover;
-}
-
-.upload-card {
-    background: linear-gradient(180deg, #ffffff 0%, #f6fff7 100%);
-    border: 1px solid #d9f2dc;
-}
-
-.upload-card input[type="file"] {
-    width: 100%;
-    padding: 10px;
-    border: 1px dashed #9ccc65;
-    border-radius: 10px;
-    background: #fcfffc;
-    margin-bottom: 10px;
-}
-
-.btn { border:none; padding:10px 15px; border-radius:10px; cursor:pointer; font-weight:600; transition: transform .2s ease; }
-.btn:hover { transform: translateY(-2px); }
-.btn-primary { background:var(--primary); color:white; }
-.btn-secondary { background:var(--secondary); color:white; }
-.actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-.small { color:var(--muted); font-size:.92rem; }
-.pop { animation: popIn .55s ease; }
-.result-panel { margin-top:20px; }
-.result-header { display:flex; gap:20px; justify-content:space-between; align-items:start; }
-#productImage { width:140px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.12); }
-.status-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:14px 0; }
-.pill { padding:10px 12px; border-radius:999px; background:#e2e8f0; font-weight:600; font-size:.92rem; }
-.status { margin-top:16px; padding:12px; border-radius:10px; display:none; }
-.status.show { display:block; }
-.status.info { background:#dbeafe; color:#1e3a8a; }
-.status.success { background:#dcfce7; color:#166534; }
-.status.error { background:#fee2e2; color:#991b1b; }
-
-.classify-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
-}
-
-.class-card {
-    border-radius: 12px;
-    padding: 12px;
-    min-height: 140px;
-}
-
-.class-card h4 {
-    margin-top: 0;
-    margin-bottom: 10px;
-}
-
-.class-card ul {
-    margin: 0;
-    padding-left: 18px;
-    font-size: .92rem;
-}
-
-.class-card li { margin-bottom: 4px; }
-.empty-li { color: #64748b; font-style: italic; }
-.organic { background: var(--organic-bg); }
-.chemical { background: var(--chemical-bg); }
-.additive { background: var(--additive-bg); }
-
-.alert-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(15, 23, 42, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 999;
-}
-
-.alert-box {
-    width: min(92vw, 420px);
-    background: #fff;
-    border-radius: 14px;
-    padding: 18px;
-    box-shadow: 0 16px 40px rgba(0,0,0,0.2);
-    text-align: center;
-}
-
-@keyframes popIn { from { transform:scale(.96); opacity:0; } to { transform:scale(1); opacity:1; } }
-@keyframes fadeUp { from { transform:translateY(18px); opacity:0; } to { transform:translateY(0); opacity:1; } }
-
-@media (max-width:760px) {
-    .status-grid { grid-template-columns:1fr; }
-    .result-header { flex-direction:column; }
-}
-</style>
 {% endblock %}
