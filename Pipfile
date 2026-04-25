@@ -5,6 +5,22 @@ name = "pypi"
 
 [packages]
 django = "*"
+<<<<<<< HEAD
+celery = {extras = ["redis"], version = "*"}
+redis = "*"
+groq = "*"
+python-dotenv = "*"
+requests = "*"
+django-celery-results = "*"
+django-celery-resultspython = "*"
+"manage.py" = "*"
+migrate = "*"
+=======
+python-dotenv = "*"
+pytesseract = "*"
+easyoc = "*"
+ocr = "*"
+>>>>>>> OCR-Implementation
 
 [dev-packages]
 

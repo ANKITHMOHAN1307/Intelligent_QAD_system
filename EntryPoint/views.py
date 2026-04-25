@@ -1,15 +1,22 @@
 import json
 from datetime import datetime
 from urllib import error, request as urllib_request
-
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
+from .tasks import run_ocr_fallback
 
-OPEN_FOOD_FACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
+
+from .ocr_service import analyze_label_image
+
+from celery.result import AsyncResult
 
 
+# -----------------------------
+# BASIC PAGES
+# -----------------------------
 def splash(request):
     return render(request, "splash.html")
 
@@ -97,15 +104,41 @@ def analyze_barcode(request):
     if not barcode:
         return JsonResponse({"status": "error", "message": "Barcode is required."}, status=400)
 
+    # ✅ Frontend signals Quagga failed — skip API, go straight to Celery
+    if barcode == 'OCR_FALLBACK':
+        task =run_ocr_fallback.delay()
+        return JsonResponse({
+            "status": "fallback",
+            "message": "OCR task queued.",
+            "task_id": task.id,
+        }, status=202)
+
+    
     try:
         with urllib_request.urlopen(OPEN_FOOD_FACTS_URL.format(barcode=barcode), timeout=12) as response:
             result = json.loads(response.read().decode("utf-8"))
     except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
-        return JsonResponse({"status": "error", "message": "Unable to contact Open Food Facts service right now."}, status=502)
+        task = run_ocr_fallback.delay()
+        return JsonResponse(
+            {
+                "status": "fallback",
+                "message": "Unable to fetch product details; OCR task queued.",
+                "task_id": task.id,
+            },
+            status=202,
+        )
 
-    product = result.get("product") or {}
+    product = result.get("product", {})
     if result.get("status") != 1 or not product:
-        return JsonResponse({"status": "error", "message": "No product information found for this barcode."}, status=404)
+        task  = run_ocr_fallback()
+        return JsonResponse(
+            {
+                "status": "fallback",
+                "message": "NO Product Data found in barcode response ; OCR task queued",
+                "task_id": task.id,
+            },
+            status=202,
+        )
 
     nutriments = product.get("nutriments") or {}
     response_data = {
@@ -129,3 +162,50 @@ def analyze_barcode(request):
         "image": product.get("image_front_url") or product.get("image_url"),
     }
     return JsonResponse(response_data)
+
+
+def task_status(request, task_id):
+    result = AsyncResult(task_id)
+    return JsonResponse({
+        "task_id": task_id,
+        "status": result.status,
+        "result": result.result if result.ready() else None,
+    })
+
+@require_POST
+def analyze_ocr_label(request):
+    image_file = request.FILES.get("image")
+    if not image_file:
+        return JsonResponse({"status": "error", "message": "Image file is required."}, status=400)
+
+    try:
+        ocr_data = analyze_label_image(image_file=image_file)
+    except ValueError as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=500)
+    except RuntimeError as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=502)
+    except Exception as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=500)
+
+    return JsonResponse(
+    {
+        "status": "success",
+        "ingredients": ocr_data.get("ingredients", []),  # ✅ keep as list, frontend joins it
+        "ocr_text": ocr_data.get("raw_text", ""),
+        "ocr_nutrients": ocr_data.get("nutrients", []),
+        "nutrition_per_100g": ocr_data.get("nutrition_per_100g", {}),  # ✅ was "nutrition"
+        "product_name": "OCR Label Analysis",
+        "brand": "Extracted from uploaded label",
+        "expiry": {
+            "status": "OCR Only",
+            "message": "No barcode lookup used in this mode.",
+        },
+        "quality": {
+            "quality": "OCR Extraction",
+            "score": "-",
+            "message": "Chart generated from OCR-detected values.",
+        },
+        "image": None,
+    }
+)
+# ✅ Add this so unexpected errors don't return None
