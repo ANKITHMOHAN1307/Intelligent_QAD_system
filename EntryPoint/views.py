@@ -131,30 +131,12 @@ def analyze_barcode(request):
         return JsonResponse(
             {
                 "status": "fallback",
-                "message": "OCR run",
+                "message": "NO Product Data found in barcode response ; OCR task queued",
                 "task_id": task.id,
             },
             status=202,
         )
 
-    ingredients = product.get("ingredients_text_en") or product.get("ingredients_text") or "Not available"
-    nutriments = product.get("nutriments", {})
-
-    nutrition = {
-        "energy_kcal_100g": nutriments.get("energy-kcal_100g") or nutriments.get("energy-kcal"),
-        "proteins_100g": nutriments.get("proteins_100g"),
-        "carbohydrates_100g": nutriments.get("carbohydrates_100g"),
-        "fat_100g": nutriments.get("fat_100g"),
-        "sugars_100g": nutriments.get("sugars_100g"),
-        "salt_100g": nutriments.get("salt_100g"),
-        "fiber_100g": nutriments.get("fiber_100g"),
-    }
-    except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
-        return JsonResponse({"status": "error", "message": "Unable to contact Open Food Facts service right now."}, status=502)
-
-    product = result.get("product") or {}
-    if result.get("status") != 1 or not product:
-        return JsonResponse({"status": "error", "message": "No product information found for this barcode."}, status=404)
 
     nutriments = product.get("nutriments") or {}
     response_data = {
