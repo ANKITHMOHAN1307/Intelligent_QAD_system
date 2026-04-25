@@ -1,0 +1,251 @@
+# .github/workflows/aider-auto-merge.yml
+#
+# HOW THIS WORKS:
+# 1. You push to development-stage, broker-message, or ocr-implementation
+# 2. First job auto-creates a PR to main
+# 3. Second job checks if there are merge conflicts in that PR
+# 4. If conflicts exist, Aider runs automatically with your pre-written prompt
+# 5. Aider commits the resolved code back to the branch
+# 6. PR is now clean and ready for your final review (or auto-merge)
+
+name: Aider auto-resolve merge to main
+
+on:
+  push:
+    branches:
+      - development-stage
+      - broker-message
+      - ocr-implementation
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # JOB 1: Open a pull request to main
+  # ─────────────────────────────────────────────
+  open-pull-request:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      pr-number: ${{ steps.create-pr.outputs.pull-request-number }}
+      pr-url: ${{ steps.create-pr.outputs.pull-request-url }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set branch-specific PR title and labels
+        id: branch-meta
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          if [ "$BRANCH" = "development-stage" ]; then
+            echo "title=[development-stage] Barcode scan + OpenFoodFacts update" >> $GITHUB_OUTPUT
+            echo "labels=development-stage,barcode,openfoodfacts" >> $GITHUB_OUTPUT
+            echo "body=### Changes from development-stage\n- Barcode scanning via camera/scanner\n- OpenFoodFacts API: expiry, ingredients, nutrients\n- Core interface that main is based on\n\n> Auto PR — Aider will check for conflicts and resolve if needed." >> $GITHUB_OUTPUT
+          elif [ "$BRANCH" = "broker-message" ]; then
+            echo "title=[broker-message] Celery/Redis fallback queue update" >> $GITHUB_OUTPUT
+            echo "labels=broker-message,celery,redis,fallback" >> $GITHUB_OUTPUT
+            echo "body=### Changes from broker-message\n- Handles barcode scan failures\n- Handles OpenFoodFacts failures\n- Redis + Celery queue for OCR fallback\n\n> Auto PR — Aider will check for conflicts and resolve if needed." >> $GITHUB_OUTPUT
+          elif [ "$BRANCH" = "ocr-implementation" ]; then
+            echo "title=[ocr-implementation] SpaceOCR + Groq AI label reader" >> $GITHUB_OUTPUT
+            echo "labels=ocr,groq,spaceocr" >> $GITHUB_OUTPUT
+            echo "body=### Changes from ocr-implementation\n- SpaceOCR text extraction from food label images\n- Groq AI parses structured food info\n- Returns same data shape as OpenFoodFacts path\n\n> Auto PR — Aider will check for conflicts and resolve if needed." >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR to main
+        id: create-pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: ${{ github.ref_name }}
+          title: ${{ steps.branch-meta.outputs.title }}
+          body: ${{ steps.branch-meta.outputs.body }}
+          labels: ${{ steps.branch-meta.outputs.labels }}
+          draft: false
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Check for conflicts and run Aider
+  # ─────────────────────────────────────────────
+  aider-resolve-conflicts:
+    runs-on: ubuntu-latest
+    needs: open-pull-request
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up git identity
+        run: |
+          git config user.name "aider-bot"
+          git config user.email "aider-bot@users.noreply.github.com"
+
+      - name: Fetch all branches
+        run: |
+          git fetch origin main
+          git fetch origin ${{ github.ref_name }}
+          git checkout ${{ github.ref_name }}
+
+      - name: Check if merge conflict exists
+        id: conflict-check
+        run: |
+          git merge origin/main --no-commit --no-ff || true
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+            echo "conflicted_files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')" >> $GITHUB_OUTPUT
+            git merge --abort
+          else
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+            git merge --abort 2>/dev/null || true
+          fi
+
+      - name: Set up Python
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Aider
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        run: pip install aider-chat
+
+      - name: Write Aider prompt for this branch
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          CONFLICTED="${{ steps.conflict-check.outputs.conflicted_files }}"
+
+          if [ "$BRANCH" = "development-stage" ]; then
+            cat > /tmp/aider_prompt.txt << 'PROMPT'
+          You are resolving a merge conflict between the development-stage branch and main.
+
+          Context:
+          - development-stage handles barcode scanning and OpenFoodFacts API retrieval
+          - It retrieves: expiry date, ingredient list, and nutrient list
+          - main should use the same interface and flow as development-stage
+
+          Instructions:
+          1. Find all conflict markers (<<<<<<< ======= >>>>>>>)
+          2. For barcode scanning functions: prefer development-stage logic
+          3. For OpenFoodFacts API calls: prefer development-stage logic
+          4. For UI/display functions: if main has additional display logic, keep both - do not drop either
+          5. Do not break the happy path: barcode → OpenFoodFacts → display FoodInfo
+          6. After resolving all conflicts, make sure there are no duplicate function definitions
+          7. Commit the resolved files with message: "fix: resolve development-stage merge conflict via aider"
+          PROMPT
+
+          elif [ "$BRANCH" = "broker-message" ]; then
+            cat > /tmp/aider_prompt.txt << 'PROMPT'
+          You are resolving a merge conflict between the broker-message branch and main.
+
+          Context:
+          - broker-message handles failures: when barcode scan fails OR OpenFoodFacts returns nothing
+          - It uses Redis + Celery to queue the fallback OCR task
+          - The branch currently has print() placeholders where Celery task dispatch should go
+          - main already has the barcode + OpenFoodFacts happy path from development-stage
+
+          Instructions:
+          1. Find all conflict markers (<<<<<<< ======= >>>>>>>)
+          2. For failure-handling functions (barcode fails, OFF API fails): prefer broker-message logic
+          3. Replace any print() placeholder with: celery_app.send_task('handle_ocr_fallback', args=[scan_input])
+          4. For the happy path (barcode succeeds): keep main branch logic, do not overwrite it
+          5. For Celery/Redis config: prefer broker-message configuration
+          6. Do not break the failure detection → queue → OCR redirect flow
+          7. Commit the resolved files with message: "fix: resolve broker-message merge conflict via aider"
+          PROMPT
+
+          elif [ "$BRANCH" = "ocr-implementation" ]; then
+            cat > /tmp/aider_prompt.txt << 'PROMPT'
+          You are resolving a merge conflict between the ocr-implementation branch and main.
+
+          Context:
+          - ocr-implementation handles food packet label images
+          - It runs SpaceOCR for text extraction, then Groq AI to structure the data
+          - It returns the same data shape as OpenFoodFacts: expiry, ingredients, nutrients
+          - OCR is always the FALLBACK path, never the default
+
+          Instructions:
+          1. Find all conflict markers (<<<<<<< ======= >>>>>>>)
+          2. For OCR functions (SpaceOCR calls, Groq AI calls): prefer ocr-implementation logic
+          3. For display/UI functions: prefer main branch logic so the output looks identical to the barcode path
+          4. The OCR path must only be called from the handle_ocr_fallback Celery task
+          5. Do not let OCR become the default path - it must remain fallback only
+          6. Ensure the Groq prompt instructs: extract product_name, expiry_date, ingredients list, nutrients dict
+          7. Commit the resolved files with message: "fix: resolve ocr-implementation merge conflict via aider"
+          PROMPT
+          fi
+
+          echo "Prompt written:"
+          cat /tmp/aider_prompt.txt
+
+      - name: Run Aider to resolve conflicts
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Merge with conflicts so Aider can see the conflict markers
+          git merge origin/main --no-ff || true
+
+          CONFLICTED="${{ steps.conflict-check.outputs.conflicted_files }}"
+
+          # Run Aider in non-interactive mode with the prompt
+          aider \
+            --model claude-sonnet-4-20250514 \
+            --yes \
+            --no-git \
+            --message "$(cat /tmp/aider_prompt.txt)" \
+            $CONFLICTED
+
+      - name: Commit Aider's resolved files
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        run: |
+          BRANCH="${{ github.ref_name }}"
+
+          # Stage all resolved files
+          git add -A
+
+          # Check if there's anything to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit - Aider may have resolved in place"
+          else
+            git commit -m "fix: aider resolved merge conflict from $BRANCH into main [skip ci]"
+            git push origin $BRANCH
+          fi
+
+      - name: Comment on PR with resolution status
+        if: steps.conflict-check.outputs.has_conflicts == 'true'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ needs.open-pull-request.outputs.pr-number }}
+          body: |
+            ## Aider conflict resolution complete
+
+            Conflicted files detected: `${{ steps.conflict-check.outputs.conflicted_files }}`
+
+            Aider has resolved the merge conflicts using the branch-specific logic rules.
+            Please review the changes before approving this PR.
+
+            **Branch:** `${{ github.ref_name }}`
+            **Model used:** claude-sonnet-4-20250514
+
+      - name: Comment if no conflicts found
+        if: steps.conflict-check.outputs.has_conflicts == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ needs.open-pull-request.outputs.pr-number }}
+          body: |
+            ## No merge conflicts detected
+
+            This branch merges cleanly into main. No Aider intervention was needed.
+            Ready for review and merge.
