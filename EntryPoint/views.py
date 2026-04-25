@@ -1,13 +1,17 @@
 import json
 from datetime import datetime
 from urllib import error, request as urllib_request
-
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
+from .tasks import run_ocr_fallback
+
 
 OPEN_FOOD_FACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
+
+from celery.result import AsyncResult
 
 
 def splash(request):
@@ -97,9 +101,54 @@ def analyze_barcode(request):
     if not barcode:
         return JsonResponse({"status": "error", "message": "Barcode is required."}, status=400)
 
+    # ✅ Frontend signals Quagga failed — skip API, go straight to Celery
+    if barcode == 'OCR_FALLBACK':
+        task =run_ocr_fallback.delay()
+        return JsonResponse({
+            "status": "fallback",
+            "message": "OCR task queued.",
+            "task_id": task.id,
+        }, status=202)
+
+    api_url = OPEN_FOOD_FACTS_URL.format(barcode=barcode)
     try:
         with urllib_request.urlopen(OPEN_FOOD_FACTS_URL.format(barcode=barcode), timeout=12) as response:
             result = json.loads(response.read().decode("utf-8"))
+    except (error.HTTPError, error.URLError, TimeoutError):
+        task = run_ocr_fallback.delay()
+        return JsonResponse(
+            {
+                "status": "fallback",
+                "message": "OCR run",
+                "task_id": task.id,
+            },
+            status=202,
+        )
+
+    product = result.get("product", {})
+    if result.get("status") != 1 or not product:
+        task = task_status.delay()
+        return JsonResponse(
+            {
+                "status": "fallback",
+                "message": "OCR run",
+                "task_id": task.id,
+            },
+            status=202,
+        )
+
+    ingredients = product.get("ingredients_text_en") or product.get("ingredients_text") or "Not available"
+    nutriments = product.get("nutriments", {})
+
+    nutrition = {
+        "energy_kcal_100g": nutriments.get("energy-kcal_100g") or nutriments.get("energy-kcal"),
+        "proteins_100g": nutriments.get("proteins_100g"),
+        "carbohydrates_100g": nutriments.get("carbohydrates_100g"),
+        "fat_100g": nutriments.get("fat_100g"),
+        "sugars_100g": nutriments.get("sugars_100g"),
+        "salt_100g": nutriments.get("salt_100g"),
+        "fiber_100g": nutriments.get("fiber_100g"),
+    }
     except (error.HTTPError, error.URLError, TimeoutError, json.JSONDecodeError):
         return JsonResponse({"status": "error", "message": "Unable to contact Open Food Facts service right now."}, status=502)
 
@@ -129,3 +178,13 @@ def analyze_barcode(request):
         "image": product.get("image_front_url") or product.get("image_url"),
     }
     return JsonResponse(response_data)
+
+
+def task_status(request, task_id):
+    result = AsyncResult(task_id)
+    return JsonResponse({
+        "task_id": task_id,
+        "status": result.status,
+        "result": result.result if result.ready() else None,
+    })
+
