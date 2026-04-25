@@ -253,9 +253,9 @@ jobs:
       - name: Auto-merge PR if conflicts were resolved
         if: steps.conflict-check.outputs.has_conflicts == 'true'
         run: |
-              gh pr merge ${{ needs.open-pull-request.outputs.pr-number }} \
-                --merge \
-                --auto \
-                --subject "chore: auto-merge ${{ github.ref_name }} after Aider conflict resolution"
+          gh pr merge ${{ needs.open-pull-request.outputs.pr-number }} \
+            --merge \
+            --auto \
+            --subject "chore: auto-merge ${{ github.ref_name }} after Aider conflict resolution"
         env:
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
