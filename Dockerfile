@@ -8,13 +8,17 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    gcc \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Pipfile Pipfile.lock ./
-RUN pip install pipenv && pipenv install --deploy --system
+
+RUN pip install pipenv gunicorn && \
+    pipenv install --deploy --system
 
 COPY . .
 
 EXPOSE 8000
 
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "Intelligent-QAD-system.wsgi:application"]

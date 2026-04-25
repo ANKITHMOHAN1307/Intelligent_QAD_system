@@ -10,9 +10,8 @@ redis = "*"
 groq = "*"
 python-dotenv = "*"
 requests = "*"
-
-
 psycopg2-binary = "*"
+django-celery-results = "*"
 
 [dev-packages]
 
