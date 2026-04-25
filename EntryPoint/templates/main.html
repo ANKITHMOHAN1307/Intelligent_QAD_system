@@ -251,13 +251,14 @@ async function analyzeBarcode(rawBarcode) {
 }
 
 function pollTaskStatus(taskId) {
-    let attempsts = 0;
+    let attempts = 0;
     const maxAttempts = 15;
     const interval = setInterval(() => {
-        attempsts++;
-        if (attempsts>maxAttempts){
+        attempts++;
+        if (attempts>maxAttempts){
             clearInterval(interval);
-            showStatus('X OCR task timed out','error');
+            showStatus('❌ OCR task timed out','error');
+            return;
         }
         fetch(`/task-status/${taskId}/`)
         .then(r => r.json())
@@ -282,28 +283,7 @@ function pollTaskStatus(taskId) {
             showStatus('❌ Could not check task status.', 'error');
         });
     }, 2000); // poll every 2 seconds
-    try {
-        const response = await fetch('{% url "analyze_barcode" %}', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': getCookie('csrftoken'),
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: JSON.stringify({ barcode })
-        });
-
-        const data = await parseResponse(response);
-        if (!response.ok || data.status !== 'success') {
-            throw new Error(data.message || `Request failed (${response.status})`);
-        }
-
-        renderProductData(data);
-        showStatus('✅ Product analysis completed successfully.', 'success');
-    } catch (error) {
-        showStatus(`❌ ${error.message}`, 'error');
-    }
+    
 }
 
 function renderProductData(data) {
@@ -460,6 +440,8 @@ async function decodeUploadedImage() {
     } catch {
         showStatus('❌ Unable to read uploaded image.', 'error');
         showAlert('Upload a clear barcode image with good lighting.');
+        showStatus('⏳ Barcode decoding failed. Queuing OCR task...', 'info');
+        triggerOCRFallback();
         return;
     }
 
@@ -475,8 +457,9 @@ async function decodeUploadedImage() {
         }
     }
 
-    showStatus('❌ Could not decode barcode from upload.', 'error');
+    showStatus('⏳ Could not decode barcode from upload. Queuing OCR task...', 'info');
     showAlert('Could not read barcode. Keep barcode large, straight, and well-lit.');
+    triggerOCRFallback();
 }
 
 function isStableDetection(code) {
@@ -544,6 +527,40 @@ function stopScanner() {
     }
 }
 
+function decodeUploadedImage() {
+    const fileInput = document.getElementById('imageInput');
+    if (!fileInput.files.length) {
+        showStatus('❌ Please select an image first.', 'error');
+        return;
+    }
+
+    const file = fileInput.files[0];
+    const imageUrl = URL.createObjectURL(file);
+
+    Quagga.decodeSingle({
+        src: imageUrl,
+        numOfWorkers: 0,
+        decoder: {
+            readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader']
+        }
+    }, function(result) {
+        URL.revokeObjectURL(imageUrl);
+
+        if (result && result.codeResult) {
+            // ✅ Barcode found — proceed normally
+            analyzeBarcode(result.codeResult.code);
+        } else {
+            // ✅ Barcode not found — queue Celery OCR task directly
+            showStatus('⏳ Barcode not detected. Queuing OCR task...', 'info');
+            triggerOCRFallback();
+        }
+    });
+    if (!activeScanner) return;
+    Quagga.stop();
+    activeScanner = false;
+    recentDetections = [];
+    showStatus('Scanner stopped.', 'info');
+}
 function decodeUploadedImage() {
     const fileInput = document.getElementById('imageInput');
     if (!fileInput.files.length) {
