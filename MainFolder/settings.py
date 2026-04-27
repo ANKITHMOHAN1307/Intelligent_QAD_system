@@ -27,6 +27,10 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["*"]
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://qad-app-ajfqh3eaguaag6db.uaenorth-01.azurewebsites.net",
+]
+
 
 # Application definition
 
