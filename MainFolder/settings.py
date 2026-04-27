@@ -69,7 +69,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'MainFolder.wsgi.application'
+WSGI_APPLICATION = 'Intelligent_QAD_system.wsgi.application'
 
 
 # Database
